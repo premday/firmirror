@@ -46,6 +46,7 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `vendors.hpe.gens` | Comma-separated HPE generations (gen10,gen11,gen12) | `""` |
 | `storage.outputDir` | Output directory inside container (for local storage) | `/data/firmirror` |
 | `storage.s3.enabled` | Enable S3 storage backend | `false` |
+| `storage.s3.cleanup` | Replace rebuilt metadata releases and delete unreferenced CAB packages | `false` |
 | `storage.s3.bucket` | S3 bucket name | `""` |
 | `storage.s3.prefix` | S3 prefix/path within bucket | `""` |
 | `storage.s3.region` | AWS region | `""` |

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,7 @@ type HPEFlags struct {
 
 type S3 struct {
 	Enable   bool   `help:"Use S3 storage backend instead of local filesystem. Requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables" default:"false"`
+	Cleanup  bool   `help:"Replace rebuilt releases in metadata and delete unreferenced CAB packages from S3 after saving metadata." default:"false"`
 	Bucket   string `help:"S3 bucket name for storing firmware files"`
 	Prefix   string `help:"Optional prefix for all S3 keys" default:""`
 	Region   string `help:"AWS region" default:"us-east-1"`
@@ -65,7 +67,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	// Check if bin tools are available
 	for _, bin := range []string{"fwupdtool", "jcat-tool"} {
 		if _, err := exec.LookPath(bin); err != nil {
@@ -122,10 +124,11 @@ func run() error {
 	}
 
 	config := firmirror.FirmirrorConfig{
-		CacheDir:       ".firmirror_cache",
-		Certificate:    args.Signature.Certificate,
-		PrivateKey:     args.Signature.PrivateKey,
-		MaxConcurrency: args.Concurrency,
+		CacheDir:                    ".firmirror_cache",
+		Certificate:                 args.Signature.Certificate,
+		PrivateKey:                  args.Signature.PrivateKey,
+		MaxConcurrency:              args.Concurrency,
+		CleanupUnreferencedPackages: args.S3.Cleanup,
 	}
 
 	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
@@ -151,6 +154,9 @@ func run() error {
 		slog.Info("Saving repository metadata")
 		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
 			slog.Error("Failed to save metadata", "error", saveErr)
+			if args.S3.Cleanup {
+				runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
+			}
 		}
 	}()
 

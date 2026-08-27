@@ -32,6 +32,8 @@ storage:
   outputDir: /data/firmirror
   s3:
     enabled: false
+    # Replace rebuilt metadata releases and delete unreferenced CAB packages
+    cleanup: false
     bucket: ""
     prefix: ""
     region: ""

@@ -17,3 +17,10 @@ type Storage interface {
 	Exists(ctx context.Context, key string) (bool, error)
 }
 
+// packageCleaner is implemented by storage backends that support removing
+// unreferenced firmware packages. Local storage deliberately does not
+// implement this interface so local repositories retain old packages.
+type packageCleaner interface {
+	Delete(ctx context.Context, key string) error
+	List(ctx context.Context, prefix string) ([]string, error)
+}

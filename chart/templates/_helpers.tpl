@@ -73,6 +73,9 @@ Build the firmirror command arguments
 - "refresh"
 {{- if .Values.storage.s3.enabled }}
 - "--s3.enable"
+{{- if .Values.storage.s3.cleanup }}
+- "--s3.cleanup"
+{{- end }}
 {{- if .Values.storage.s3.bucket }}
 - {{ printf "--s3.bucket=%s" .Values.storage.s3.bucket | quote }}
 {{- end }}

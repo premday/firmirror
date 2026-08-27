@@ -96,6 +96,18 @@ func (s *S3Storage) Write(ctx context.Context, key string, data io.Reader) error
 	return fmt.Errorf("failed to upload to S3 after %d attempts: %w", maxRetries, err)
 }
 
+// Delete removes data with the given key from S3.
+func (s *S3Storage) Delete(ctx context.Context, key string) error {
+	fullKey := s.buildKey(key)
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(fullKey),
+	}); err != nil {
+		return fmt.Errorf("failed to delete object from S3: %w", err)
+	}
+	return nil
+}
+
 // Read retrieves data for the given key from S3
 func (s *S3Storage) Read(ctx context.Context, key string) (io.ReadCloser, error) {
 	fullKey := s.buildKey(key)

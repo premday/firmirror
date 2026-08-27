@@ -112,6 +112,7 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | `--hpe.gens` | Generations to fetch (`gen8`–`gen12`) | `gen8,gen9,gen10,gen11,gen12` |
 | **S3 Storage** | | |
 | `--s3.enable` | Use S3 storage backend instead of local filesystem | `false` |
+| `--s3.cleanup` | Replace rebuilt releases in metadata and delete unreferenced CAB packages from S3 after a successful metadata save | `false` |
 | `--s3.bucket` | S3 bucket name | (required if S3 enabled) |
 | `--s3.prefix` | Optional prefix for all S3 keys | `""` |
 | `--s3.region` | AWS region | `us-east-1` |
@@ -160,11 +161,14 @@ export AWS_SECRET_ACCESS_KEY=...
 
 ./firmirror refresh \
   --s3.enable \
+  --s3.cleanup \
   --s3.bucket=my-bucket \
   --s3.prefix=firmirror \
   --s3.region=eu-west-1 \
   --hpe.enable --hpe.gens=gen11
 ```
+
+S3 cleanup is opt-in. With `--s3.cleanup`, Firmirror replaces old metadata releases when their packages are rebuilt, then deletes every `.cab` object under the configured prefix that is not referenced by the updated metadata. Without the flag, rebuilt releases are appended and existing CAB objects are retained. Metadata and non-CAB objects are never deleted.
 
 ## Metadata Signing
 

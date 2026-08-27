@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,10 +26,11 @@ import (
 )
 
 type FirmirrorConfig struct {
-	CacheDir       string // Local cache directory for temporary work
-	Certificate    string // Path to certificate file for signing metadata (.pem or .crt)
-	PrivateKey     string // Path to private key file for signing metadata (.pem or .key)
-	MaxConcurrency int    // Maximum number of firmware entries processed concurrently (default 1)
+	CacheDir                    string // Local cache directory for temporary work
+	Certificate                 string // Path to certificate file for signing metadata (.pem or .crt)
+	PrivateKey                  string // Path to private key file for signing metadata (.pem or .key)
+	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
+	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 }
 
 type FirmirrorSyncer struct {
@@ -413,30 +416,21 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	logger := slog.With("component", "metadata-save")
 
 	if len(f.newComponents) == 0 {
-		logger.Info("No new component, skipping metadata update")
-		return nil
+		if !f.Config.CleanupUnreferencedPackages {
+			logger.Info("No new component, skipping metadata update")
+			return nil
+		}
+		logger.Info("No new component, skipping metadata update and checking for stale packages")
+		return f.removeUnreferencedPackages(ctx, f.existingMetadata)
 	}
 
-	componentMap := make(map[string]*lvfs.Component)
-
-	// Add existing components first
-	if f.existingMetadata != nil {
-		for i := range f.existingMetadata.Component {
-			comp := f.existingMetadata.Component[i]
-			componentMap[comp.ID] = &comp
-		}
-	}
-
-	// Add or merge new components
-	for _, comp := range f.newComponents {
-		if existing, ok := componentMap[comp.ID]; ok {
-			// Merge releases if component already exists
-			logger.Debug("Merging component", "id", comp.ID)
-			existing.Releases = append(existing.Releases, comp.Releases...)
-		} else {
-			// Add new component
-			componentMap[comp.ID] = &comp
-		}
+	componentMap, supersededLocations := mergeComponents(
+		f.existingMetadata,
+		f.newComponents,
+		f.Config.CleanupUnreferencedPackages,
+	)
+	if !f.Config.CleanupUnreferencedPackages {
+		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
 	// Build final components structure (sorted by ID for deterministic output)
@@ -513,11 +507,137 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		return fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
 
+	// The new metadata is now committed, so unreferenced S3 packages can be
+	// removed. A later no-op run retries any transient cleanup failures.
+	if err := f.removeUnreferencedPackages(ctx, components); err != nil {
+		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
+	}
+
 	logger.Info("Metadata saved successfully",
 		"total_merged_components", len(componentMap),
 		"new_components", len(f.newComponents))
 
 	return nil
+}
+
+func firmwareFilenamesByComponent(components []lvfs.Component) map[string]map[string]struct{} {
+	filenames := make(map[string]map[string]struct{})
+	for _, component := range components {
+		for _, release := range component.Releases {
+			for _, checksum := range release.Checksums {
+				if checksum.Filename != "" {
+					if filenames[component.ID] == nil {
+						filenames[component.ID] = make(map[string]struct{})
+					}
+					filenames[component.ID][checksum.Filename] = struct{}{}
+				}
+			}
+		}
+	}
+	return filenames
+}
+
+func releaseContainsFirmware(release lvfs.Release, filenames map[string]struct{}) bool {
+	for _, checksum := range release.Checksums {
+		if _, ok := filenames[checksum.Filename]; ok && checksum.Filename != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, replaceSuperseded bool) (map[string]*lvfs.Component, []string) {
+	componentMap := make(map[string]*lvfs.Component)
+	supersededLocations := make(map[string]struct{})
+	newFirmwareFilenames := firmwareFilenamesByComponent(incoming)
+
+	if existing != nil {
+		for _, existingComponent := range existing.Component {
+			component := existingComponent
+			component.Releases = make([]lvfs.Release, 0, len(existingComponent.Releases))
+			for _, release := range existingComponent.Releases {
+				superseded := releaseContainsFirmware(release, newFirmwareFilenames[component.ID])
+				if superseded {
+					collectReleaseLocations(release, supersededLocations)
+				}
+				if !superseded || !replaceSuperseded {
+					component.Releases = append(component.Releases, release)
+				}
+			}
+			if len(component.Releases) > 0 {
+				componentMap[component.ID] = &component
+			}
+		}
+	}
+
+	for _, incomingComponent := range incoming {
+		component := incomingComponent
+		if existingComponent, ok := componentMap[component.ID]; ok {
+			existingComponent.Releases = append(existingComponent.Releases, component.Releases...)
+		} else {
+			componentMap[component.ID] = &component
+		}
+	}
+
+	return componentMap, slices.Sorted(maps.Keys(supersededLocations))
+}
+
+func logRetainedSupersededPackages(logger *slog.Logger, locations []string) {
+	for _, location := range locations {
+		logger.Info("Leaving superseded firmware package untouched because --s3.cleanup was not specified", "location", location)
+	}
+}
+
+func collectReleaseLocations(release lvfs.Release, locations map[string]struct{}) {
+	if release.Location != "" {
+		locations[release.Location] = struct{}{}
+	}
+	for _, artifact := range release.Artifacts {
+		if artifact.Location != "" {
+			locations[artifact.Location] = struct{}{}
+		}
+	}
+}
+
+func (f *FirmirrorSyncer) removeUnreferencedPackages(ctx context.Context, components *lvfs.Components) error {
+	if !f.Config.CleanupUnreferencedPackages {
+		return nil
+	}
+
+	cleaner, ok := f.Storage.(packageCleaner)
+	if !ok || components == nil {
+		return nil
+	}
+
+	referencedLocations := make(map[string]struct{})
+	for _, component := range components.Component {
+		for _, release := range component.Releases {
+			collectReleaseLocations(release, referencedLocations)
+		}
+	}
+
+	keys, err := cleaner.List(ctx, "")
+	if err != nil {
+		return fmt.Errorf("listing stored packages: %w", err)
+	}
+	slices.Sort(keys)
+
+	logger := slog.With("component", "metadata-save")
+	var deleteErrors []error
+	for _, key := range keys {
+		if !strings.HasSuffix(key, ".cab") {
+			continue
+		}
+		if _, referenced := referencedLocations[key]; referenced {
+			continue
+		}
+		if err := cleaner.Delete(ctx, key); err != nil {
+			deleteErrors = append(deleteErrors, fmt.Errorf("deleting %s: %w", key, err))
+			continue
+		}
+		logger.Info("Removed unreferenced firmware package", "location", key)
+	}
+	return errors.Join(deleteErrors...)
 }
 
 // signMetadata creates a JCAT file for the given file using jcat-tool.
