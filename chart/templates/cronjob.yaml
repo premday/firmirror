@@ -41,6 +41,9 @@ spec:
           securityContext:
             {{- toYaml .Values.podSecurityContext | nindent 12 }}
           restartPolicy: {{ .Values.cronjob.restartPolicy }}
+          {{- if .Values.cronjob.terminationGracePeriodSeconds }}
+          terminationGracePeriodSeconds: {{ .Values.cronjob.terminationGracePeriodSeconds }}
+          {{- end }}
           containers:
           - name: firmirror
             securityContext:

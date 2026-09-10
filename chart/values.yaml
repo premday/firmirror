@@ -109,3 +109,8 @@ cronjob:
   activeDeadlineSeconds: 7200  # 2 hours
   # Time to live after finished
   ttlSecondsAfterFinished: 86400  # 24 hours
+  # Grace period on termination. On activeDeadlineSeconds expiry the pod gets
+  # SIGTERM, which cancels the context and lets the deferred SaveMetadata
+  # persist the run's progress; 30s (the Kubernetes default) is not enough to
+  # compress, sign and upload metadata.xml.zst.
+  terminationGracePeriodSeconds: 600  # 10 minutes
