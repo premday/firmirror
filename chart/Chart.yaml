@@ -2,8 +2,8 @@ apiVersion: v2
 name: firmirror
 description: A Helm chart for Firmirror - LVFS-compatible firmware repository sync
 type: application
-version: 0.1.0
-appVersion: 0.1.0
+version: 0.2.1
+appVersion: 0.2.1
 keywords:
 - lvfs
 - fwupd
