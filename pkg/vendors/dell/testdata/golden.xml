@@ -1,26 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="firmware">
-  <id>com.dell.2c22d04b-b438-59da-87c5-37020430e451</id>
+  <id>com.dell.bc6117e0-e464-5710-9f0a-802ddb5441ae</id>
   <name>Mellanox ConnectX-6 Dx Dual Port 100GbE QSFP56 PCIe Adapter</name>
   <summary>Mellanox ConnectX-6 DX Ethernet Adapter Firmware</summary>
   <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
   <provides>
-    <firmware type="flashed">b1202641-5adf-550d-8922-7ea8d86151ef</firmware>
-    <firmware type="flashed">29608ae6-51c0-5b9d-8ff5-528e1c762702</firmware>
     <firmware type="flashed">05370b1a-1dcb-53e2-b31c-b7515f0419cb</firmware>
-    <firmware type="flashed">86a414e5-40b5-5753-ac2d-3bcbf79841e6</firmware>
-    <firmware type="flashed">9e703f24-3eae-503d-bdd0-d209855ea5ee</firmware>
-    <firmware type="flashed">8aad24d4-5777-5b5a-b734-b502f2c0701a</firmware>
-    <firmware type="flashed">c87231ec-6813-5de5-b0e3-5f746356f2e4</firmware>
     <firmware type="flashed">c6eadaf2-1f82-582d-b67d-977ff73ec6ec</firmware>
-    <firmware type="flashed">64e5e502-c1ec-5288-a047-c2083182761a</firmware>
-    <firmware type="flashed">71d73ad9-aadc-5161-8c5f-94e522c6310e</firmware>
+    <firmware type="flashed">b1202641-5adf-550d-8922-7ea8d86151ef</firmware>
     <firmware type="flashed">5aa2d204-ed89-5610-9af5-52f23abe4820</firmware>
-    <firmware type="flashed">8467e751-e8e5-5570-b3c9-f277a3b8831c</firmware>
     <firmware type="flashed">525c605d-eaee-5d92-aa8e-ffb595b28270</firmware>
-    <firmware type="flashed">68b6a794-cf77-5645-a2a6-479a7cb664dd</firmware>
-    <firmware type="flashed">761653e3-8411-52a7-8fb6-30d0b2fc45f3</firmware>
+    <firmware type="flashed">29608ae6-51c0-5b9d-8ff5-528e1c762702</firmware>
     <firmware type="flashed">c74ae360-2551-5c7b-88e4-543d96ae4869</firmware>
+    <firmware type="flashed">761653e3-8411-52a7-8fb6-30d0b2fc45f3</firmware>
+    <firmware type="flashed">8aad24d4-5777-5b5a-b734-b502f2c0701a</firmware>
+    <firmware type="flashed">71d73ad9-aadc-5161-8c5f-94e522c6310e</firmware>
+    <firmware type="flashed">8467e751-e8e5-5570-b3c9-f277a3b8831c</firmware>
+    <firmware type="flashed">9e703f24-3eae-503d-bdd0-d209855ea5ee</firmware>
+    <firmware type="flashed">64e5e502-c1ec-5288-a047-c2083182761a</firmware>
+    <firmware type="flashed">c87231ec-6813-5de5-b0e3-5f746356f2e4</firmware>
+    <firmware type="flashed">68b6a794-cf77-5645-a2a6-479a7cb664dd</firmware>
+    <firmware type="flashed">86a414e5-40b5-5753-ac2d-3bcbf79841e6</firmware>
     <firmware type="flashed">5956602d-487b-5b28-b8c9-c76b328a96ff</firmware>
     <firmware type="flashed">df585eef-ff25-5d3c-a016-ac89b573dba8</firmware>
   </provides>
@@ -48,27 +48,27 @@
 </component>
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="firmware">
-  <id>com.dell.8d79aa92-c91f-5a27-9595-bab4061e417e</id>
+  <id>com.dell.55532282-cbfb-5994-b3ce-78c53000bcf6</id>
   <name>Mellanox ConnectX-6 Family of Server Adapters Firmware</name>
   <summary>Mellanox ConnectX-6 DX Ethernet Adapter Firmware</summary>
   <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
   <provides>
-    <firmware type="flashed">1dc789b1-22a9-5706-8ca7-687a97c25a69</firmware>
-    <firmware type="flashed">0bf7ef13-db2b-5cff-8f26-f2197ce7aff5</firmware>
     <firmware type="flashed">ab466e63-2b66-5386-8c5a-2cfcc32f90e1</firmware>
-    <firmware type="flashed">ebba3f91-4e64-5565-b074-bb757b9500d0</firmware>
-    <firmware type="flashed">b95fad73-4c23-57e4-944e-41589c6f61d4</firmware>
-    <firmware type="flashed">a75b82b1-7c02-5832-a676-b6ec3eaf20ed</firmware>
-    <firmware type="flashed">663f918c-d866-562e-aeb5-2de11303b274</firmware>
     <firmware type="flashed">dab25272-6f0e-59f1-9bf0-c901b4ee7275</firmware>
-    <firmware type="flashed">8470e3a0-11a5-505b-afad-b03238085b61</firmware>
-    <firmware type="flashed">078b6d33-0e8a-5ad5-bcc1-856ebf344429</firmware>
+    <firmware type="flashed">1dc789b1-22a9-5706-8ca7-687a97c25a69</firmware>
     <firmware type="flashed">73576886-b9a0-5252-9432-1359ef115a7d</firmware>
-    <firmware type="flashed">84cbba88-46a9-53d2-8545-18e757212de0</firmware>
     <firmware type="flashed">1c40f23e-ebb0-5804-9289-79c96f96b43a</firmware>
-    <firmware type="flashed">4f285c3b-6a91-59c5-a46b-c41ef441adfc</firmware>
-    <firmware type="flashed">f05d089e-9051-5bf3-ab42-eb4fe74b5c24</firmware>
+    <firmware type="flashed">0bf7ef13-db2b-5cff-8f26-f2197ce7aff5</firmware>
     <firmware type="flashed">ee586b63-2393-5b7d-bb04-6cc7d26004c9</firmware>
+    <firmware type="flashed">f05d089e-9051-5bf3-ab42-eb4fe74b5c24</firmware>
+    <firmware type="flashed">a75b82b1-7c02-5832-a676-b6ec3eaf20ed</firmware>
+    <firmware type="flashed">078b6d33-0e8a-5ad5-bcc1-856ebf344429</firmware>
+    <firmware type="flashed">84cbba88-46a9-53d2-8545-18e757212de0</firmware>
+    <firmware type="flashed">b95fad73-4c23-57e4-944e-41589c6f61d4</firmware>
+    <firmware type="flashed">8470e3a0-11a5-505b-afad-b03238085b61</firmware>
+    <firmware type="flashed">663f918c-d866-562e-aeb5-2de11303b274</firmware>
+    <firmware type="flashed">4f285c3b-6a91-59c5-a46b-c41ef441adfc</firmware>
+    <firmware type="flashed">ebba3f91-4e64-5565-b074-bb757b9500d0</firmware>
     <firmware type="flashed">0e991616-5e06-51f9-9cce-c2f891d6a0eb</firmware>
     <firmware type="flashed">11af61be-c94f-5672-92e4-54a4d77cb8a7</firmware>
   </provides>

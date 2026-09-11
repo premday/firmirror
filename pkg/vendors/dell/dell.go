@@ -189,6 +189,9 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 		categories = append(categories, "X-BaseboardManagementController")
 	}
 
+	// Part of the component identity, see componentUUID.
+	systemIDs := supportedSystemIDs(fw)
+
 	// Create one component per supported device
 	var components []lvfs.Component
 	for _, dev := range fw.SupportedDevices {
@@ -207,16 +210,14 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 		out.Description = lvfs.Description{
 			Value: "<p>" + html.EscapeString(description) + "</p>",
 		}
-		out.ID = fmt.Sprintf("com.%s.%s", strings.ToLower("Dell"), uuid.NewSHA1(uuid.NameSpaceDNS, []byte(dev.ComponentID)).String())
+		out.ID = fmt.Sprintf("com.%s.%s", strings.ToLower("Dell"), componentUUID(dev.ComponentID, systemIDs))
 
 		// Provides: GUIDs for this specific device across all system IDs
-		for _, brand := range fw.SupportedSystems {
-			for _, system := range brand.Models {
-				out.Provides = append(out.Provides, lvfs.Firmware{
-					Type: "flashed",
-					Text: uuid.NewSHA1(uuid.NameSpaceDNS, fmt.Appendf(nil, "REDFISH\\VENDOR_Dell&SYSTEMID_%s&SOFTWAREID_%s", system.SystemID, dev.ComponentID)).String(),
-				})
-			}
+		for _, systemID := range systemIDs {
+			out.Provides = append(out.Provides, lvfs.Firmware{
+				Type: "flashed",
+				Text: uuid.NewSHA1(uuid.NameSpaceDNS, fmt.Appendf(nil, "REDFISH\\VENDOR_Dell&SYSTEMID_%s&SOFTWAREID_%s", systemID, dev.ComponentID)).String(),
+			})
 		}
 
 		out.Custom = append(out.Custom, rebootCustom...)
@@ -243,6 +244,29 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 	}
 
 	return components, nil
+}
+
+// supportedSystemIDs returns the sorted, de-duplicated systems an entry covers.
+func supportedSystemIDs(fw DellSoftwareComponent) []string {
+	var systemIDs []string
+	for _, brand := range fw.SupportedSystems {
+		for _, system := range brand.Models {
+			systemIDs = append(systemIDs, system.SystemID)
+		}
+	}
+	slices.Sort(systemIDs)
+	return slices.Compact(systemIDs)
+}
+
+// componentUUID keys a component on the device and the systems it applies to.
+// Dell ships one package per platform family for the same device; sharing an ID
+// would merge their releases and offer a machine a payload it cannot flash.
+func componentUUID(deviceComponentID string, systemIDs []string) string {
+	seed := deviceComponentID
+	if len(systemIDs) > 0 {
+		seed = fmt.Sprintf("%s&SYSTEMIDS_%s", deviceComponentID, strings.Join(systemIDs, ","))
+	}
+	return uuid.NewSHA1(uuid.NameSpaceDNS, []byte(seed)).String()
 }
 
 func getString(strings DellTranslatable, language string) (string, error) {

@@ -569,7 +569,7 @@ func TestFirmirrorSyncer_LoadMetadata(t *testing.T) {
 		assert.Empty(t, syncer.existingIndex, "Index should be empty")
 	})
 
-	t.Run("SchemaVersionMismatchClearsIndex", func(t *testing.T) {
+	t.Run("SchemaVersionMismatchDiscardsMetadata", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		storage, err := NewLocalStorage(tmpDir)
 		require.NoError(t, err)
@@ -625,7 +625,7 @@ func TestFirmirrorSyncer_LoadMetadata(t *testing.T) {
 		err = syncer.LoadMetadata(context.TODO())
 		require.NoError(t, err, "Should load metadata successfully")
 
-		assert.NotNil(t, syncer.existingMetadata, "Existing metadata should be loaded as fallback")
+		assert.Nil(t, syncer.existingMetadata, "Stored components should be discarded when the schema version mismatches, so they are rebuilt rather than kept forever")
 		assert.Empty(t, syncer.existingIndex, "Index should be empty when schema version mismatches, forcing reprocessing")
 	})
 
@@ -691,7 +691,7 @@ func TestMergeComponents(t *testing.T) {
 			components, superseded := mergeComponents(existing, incoming, test.replaceSuperseded)
 
 			var rebuiltPackages []string
-			for _, release := range components["com.test.rebuilt"].Releases {
+			for _, release := range components[componentKey(incoming[0])].Releases {
 				if release.Location != "" {
 					rebuiltPackages = append(rebuiltPackages, release.Location)
 				} else {
@@ -699,10 +699,68 @@ func TestMergeComponents(t *testing.T) {
 				}
 			}
 			assert.Equal(t, test.wantRebuiltPackages, rebuiltPackages)
-			assert.Equal(t, "unrelated.cab", components["com.test.unrelated"].Releases[0].Location)
+			assert.Equal(t, "unrelated.cab", components[componentKey(existing.Component[1])].Releases[0].Location)
 			assert.Equal(t, []string{"old-rebuilt.cab"}, superseded)
 		})
 	}
+}
+
+// Merging these would offer the R6625 iDRAC firmware to a C6615, which fwupd
+// rejects with "No supported devices found".
+func TestMergeComponentsKeepsDifferentGUIDsApart(t *testing.T) {
+	sameIDOtherPlatform := lvfs.Component{
+		ID:       "com.dell.idrac",
+		Provides: []lvfs.Firmware{{Type: "flashed", Text: "guid-r6625"}},
+		Releases: []lvfs.Release{{
+			Version:   "7.30.30.54",
+			Location:  "r6625.cab",
+			Checksums: []lvfs.Checksum{{Filename: "idrac-7.30.30.54.exe"}},
+		}},
+	}
+	existing := &lvfs.Components{Component: []lvfs.Component{{
+		ID:       "com.dell.idrac",
+		Provides: []lvfs.Firmware{{Type: "flashed", Text: "guid-c6615"}},
+		Releases: []lvfs.Release{{
+			Version:   "7.30.30.51",
+			Location:  "c6615.cab",
+			Checksums: []lvfs.Checksum{{Filename: "idrac-7.30.30.51.exe"}},
+		}},
+	}}}
+
+	components, superseded := mergeComponents(existing, []lvfs.Component{sameIDOtherPlatform}, true)
+
+	require.Len(t, components, 2, "Components with the same ID but different GUIDs must not be merged")
+	assert.Empty(t, superseded, "A release for other platforms supersedes nothing")
+
+	c6615 := components[componentKey(existing.Component[0])]
+	require.NotNil(t, c6615)
+	require.Len(t, c6615.Releases, 1)
+	assert.Equal(t, "7.30.30.51", c6615.Releases[0].Version, "The C6615 must keep the release its cabinet actually applies to")
+
+	r6625 := components[componentKey(sameIDOtherPlatform)]
+	require.NotNil(t, r6625)
+	require.Len(t, r6625.Releases, 1)
+	assert.Equal(t, "7.30.30.54", r6625.Releases[0].Version)
+}
+
+// The normal case: a newer release for the same devices still merges.
+func TestMergeComponentsMergesSameGUIDs(t *testing.T) {
+	provides := []lvfs.Firmware{{Type: "flashed", Text: "guid-c6615"}}
+	existing := &lvfs.Components{Component: []lvfs.Component{{
+		ID:       "com.dell.idrac",
+		Provides: provides,
+		Releases: []lvfs.Release{{Version: "7.30.30.51", Location: "old.cab"}},
+	}}}
+	incoming := []lvfs.Component{{
+		ID:       "com.dell.idrac",
+		Provides: provides,
+		Releases: []lvfs.Release{{Version: "7.40.00.00", Location: "new.cab"}},
+	}}
+
+	components, _ := mergeComponents(existing, incoming, true)
+
+	require.Len(t, components, 1)
+	require.Len(t, components[componentKey(incoming[0])].Releases, 2)
 }
 
 func TestLogRetainedSupersededPackages(t *testing.T) {
