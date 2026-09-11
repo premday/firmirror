@@ -11,6 +11,20 @@ import (
 	"github.com/premday/firmirror/pkg/lvfs"
 )
 
+// componentOfType returns the first filtered component of that Dell type.
+func componentOfType(t *testing.T, catalog *DellCatalog, componentType string) *DellSoftwareComponent {
+	t.Helper()
+
+	for i := range catalog.SoftwareComponents {
+		if catalog.SoftwareComponents[i].ComponentType.Value == componentType {
+			return &catalog.SoftwareComponents[i]
+		}
+	}
+
+	t.Fatalf("no %s entry in catalog", componentType)
+	return nil
+}
+
 func TestGoldenAppStream(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "catalog.xml"))
 	if err != nil {
@@ -27,21 +41,28 @@ func TestGoldenAppStream(t *testing.T) {
 	}
 
 	filtered := (&DellVendor{}).filterCatalog(&catalog)
-	if len(filtered.SoftwareComponents) == 0 {
-		t.Fatal("no FRMW entries in catalog")
-	}
 
-	fw := filtered.SoftwareComponents[0]
-	entry := &DellFirmwareEntry{
-		Filename:              filepath.Base(fw.Path),
-		DellSoftwareComponent: &fw,
-	}
+	for _, tc := range []struct {
+		name          string
+		componentType string
+		golden        string
+	}{
+		{"Firmware", "FRMW", "golden.xml"},
+		{"BIOS", "BIOS", "golden_bios.xml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fw := componentOfType(t, filtered, tc.componentType)
+			entry := &DellFirmwareEntry{
+				Filename:              filepath.Base(fw.Path),
+				DellSoftwareComponent: fw,
+			}
 
-	components, err := entry.ToAppstream()
-	if err != nil {
-		t.Fatalf("ToAppstream failed: %v", err)
-	}
+			components, err := entry.ToAppstream()
+			if err != nil {
+				t.Fatalf("ToAppstream failed: %v", err)
+			}
 
-	goldenPath := filepath.Join("testdata", "golden.xml")
-	lvfs.AssertGoldenComponents(t, goldenPath, components)
+			lvfs.AssertGoldenComponents(t, filepath.Join("testdata", tc.golden), components)
+		})
+	}
 }
