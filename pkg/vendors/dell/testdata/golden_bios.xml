@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="firmware">
+  <id>com.dell.2c409ae1-63ff-5757-8c59-a255c6522923</id>
+  <name>PowerEdge BIOS</name>
+  <summary>Dell Server PowerEdge C6615 BIOS Version 1.12.2</summary>
+  <description><p>For more information about specific items added and resolved in this BIOS version, see the Fixes and New and enhanced features sections</p></description>
+  <provides>
+    <firmware type="flashed">54f32232-ba7b-53c9-a930-ce4fa8f6ea18</firmware>
+  </provides>
+  <url type=""></url>
+  <metadata_license>proprietary</metadata_license>
+  <project_license>proprietary</project_license>
+  <releases>
+    <release urgency="medium" version="1.12.2" date="2026-04-10" install_duration="0">
+      <description><p>For more information about specific items added and resolved in this BIOS version, see the Fixes and New and enhanced features sections</p></description>
+      <issues></issues>
+      <artifacts></artifacts>
+    </release>
+  </releases>
+  <requires></requires>
+  <custom>
+    <value key="LVFS::DeviceFlags">skips-restart</value>
+    <value key="LVFS::UpdateMessage">Reboot is required for the update to take effect.</value>
+    <value key="LVFS::UpdateProtocol">org.dmtf.redfish</value>
+    <value key="LVFS::DeviceIntegrity">signed</value>
+  </custom>
+  <keywords></keywords>
+  <categories>
+    <category>X-System</category>
+  </categories>
+</component>

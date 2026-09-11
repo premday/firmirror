@@ -21,6 +21,9 @@ import (
 	"golang.org/x/text/transform"
 )
 
+// Catalog component types the Redfish update service can flash.
+var updatableComponentTypes = []string{"FRMW", "BIOS"}
+
 func NewDellVendor(systemIDs []string) *DellVendor {
 	vendor := &DellVendor{
 		BaseURL:   "https://dl.dell.com",
@@ -81,9 +84,9 @@ func (dv *DellVendor) filterCatalog(catalog *DellCatalog) *DellCatalog {
 	filteredComponents := []DellSoftwareComponent{}
 
 	for _, fw := range catalog.SoftwareComponents {
-		// Only select firmware, not drivers
-		// FIXME include BIOS ?
-		if fw.ComponentType.Value != "FRMW" {
+		// The BIOS is its own component type, so FRMW alone drops every BIOS
+		// update. Drivers (DRVR) and applications (APAC) are not flashable.
+		if !slices.Contains(updatableComponentTypes, fw.ComponentType.Value) {
 			continue
 		}
 

@@ -120,4 +120,82 @@ Installation
       </FMPWrapperInformation>
     </FMPWrappers>
   </SoftwareComponent>
+  <SoftwareComponent schemaVersion="3.0" releaseID="G16WX" releaseDate="April 09, 2026" vendorVersion="1.12.2" dellVersion="1.12.2" packageType="LW64" xmlGenVersion="1.0.3681" path="FOLDER14411038M/1/C6615_BIOS_G16WX_WN64_1.12.2.EXE" packageID="G16WX" dateTime="2026-04-10T01:46:06-05:00" hashMD5="f11eac71ef2825491fb7f3fdf3efb3bf" size="30079280" identifier="046a954b-9d1b-4d7f-b7d4-78f899353828" rebootRequired="true" hash="29137749ccd6ef4201eef74a8f524787ccf43fc08f92c12339816681e27c0a5e" hashAlgorithm="SHA256">
+    <Name>
+      <Display lang="en"><![CDATA[Dell Server PowerEdge C6615 BIOS Version 1.12.2]]></Display>
+    </Name>
+    <ComponentType value="BIOS">
+      <Display lang="en"><![CDATA[BIOS]]></Display>
+    </ComponentType>
+    <Description>
+      <Display lang="en"><![CDATA[For more information about specific items added and resolved in this BIOS version, see the Fixes and New and enhanced features sections]]></Display>
+    </Description>
+    <LUCategory value="BIOS">
+      <Display lang="en"><![CDATA[BIOS]]></Display>
+    </LUCategory>
+    <Category value="BI">
+      <Display lang="en"><![CDATA[BIOS]]></Display>
+    </Category>
+    <SupportedDevices>
+      <Device componentID="159" embedded="1">
+        <Display lang="en"><![CDATA[PowerEdge BIOS]]></Display>
+        <RollbackInformation rollbackIdentifier="23252cbb-c429-48bf-85b2-dd3b832f0e2d" rollbackVolume="MAS022" fmpWrapperIdentifier="843cfde2-079c-49b9-a9b6-8ff603d9cf6b" fmpWrapperVersion="1.0" fmpIdentifier="B1FF281A-918F-4603-B8D2-125E02299D50" rollbackTimeout="720" fieldService="forced" alternateRollbackIdentifier="159"></RollbackInformation>
+        <PayloadConfiguration>
+          <Image type="BIOS" id="3583D919-1B3B-4E62-A29D-F0F90DDD4081" version="1.12.2" filename="16GWAVE1-011202C.cap" skip="false"></Image>
+        </PayloadConfiguration>
+      </Device>
+    </SupportedDevices>
+    <SupportedSystems>
+      <Brand key="3" prefix="PE">
+        <Display lang="en"><![CDATA[PowerEdge]]></Display>
+        <Model systemID="0C60" systemIDType="BIOS">
+          <Display lang="en"><![CDATA[C6615]]></Display>
+        </Model>
+      </Brand>
+    </SupportedSystems>
+    <!-- No Display child here on BIOS packages: generic reboot message. -->
+    <ImportantInfo URL="https://www.dell.com/support/home/us/en/19/Drivers/DriversDetails?driverId=G16WX"></ImportantInfo>
+    <Criticality value="1">
+      <Display lang="en"><![CDATA[Recommended]]></Display>
+    </Criticality>
+    <FMPWrappers>
+      <FMPWrapperInformation identifier="843cfde2-079c-49b9-a9b6-8ff603d9cf6b" name="CAP" filePathName="FmpUpdateWrapper.efi" digitalSignature="false" vendorCodeType="UINT32">
+        <Inventory supported="true" source="Device"></Inventory>
+        <Update supported="true" rollback="true"></Update>
+      </FMPWrapperInformation>
+    </FMPWrappers>
+  </SoftwareComponent>
+  <SoftwareComponent schemaVersion="3.0" releaseID="NTCC6" releaseDate="May 12, 2026" vendorVersion="8.03.16.646" dellVersion="A00" packageType="LW64" xmlGenVersion="1.0.3681" path="FOLDER14581144M/1/C6615_Chipset_Driver_NTCC6_WN64_8.03.16.646_A00.EXE" packageID="NTCC6" dateTime="2026-05-21T11:48:50-05:00" hashMD5="0d3f8c0f0f4d4a63a4be3c2b1cc7a5f1" size="15728640" identifier="8f0a5f4d-8f0e-4a15-9f6a-1a2b3c4d5e6f" rebootRequired="false" hash="9b2a1f4c1f1a5d2e3c4b5a69788796a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9" hashAlgorithm="SHA256">
+    <Name>
+      <Display lang="en"><![CDATA[AMD SP6 Chipset Driver]]></Display>
+    </Name>
+    <ComponentType value="DRVR">
+      <Display lang="en"><![CDATA[Driver]]></Display>
+    </ComponentType>
+    <Description>
+      <Display lang="en"><![CDATA[This package provides the AMD SP6 Chipset Driver]]></Display>
+    </Description>
+    <LUCategory value="Chipset">
+      <Display lang="en"><![CDATA[Chipset]]></Display>
+    </LUCategory>
+    <Category value="Chipset">
+      <Display lang="en"><![CDATA[Chipset]]></Display>
+    </Category>
+    <SupportedDevices>
+      <Device componentID="112695" embedded="0">
+        <Display lang="en"><![CDATA[PowerEdge AMD Chipset Driver]]></Display>
+      </Device>
+    </SupportedDevices>
+    <SupportedSystems>
+      <Brand key="3" prefix="PE">
+        <Display lang="en"><![CDATA[PowerEdge]]></Display>
+        <Model systemID="0C60" systemIDType="BIOS">
+          <Display lang="en"><![CDATA[C6615]]></Display>
+        </Model>
+      </Brand>
+    </SupportedSystems>
+    <Criticality value="3">
+      <Display lang="en"><![CDATA[Optional]]></Display>
+    </Criticality>
+  </SoftwareComponent>
 </Manifest>
