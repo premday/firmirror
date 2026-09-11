@@ -2,7 +2,10 @@ package lvfs
 
 import "encoding/xml"
 
-const MetadataSchemaVersion = 1
+// MetadataSchemaVersion is bumped when components are built differently, which
+// discards the stored metadata and forces a full reprocessing.
+// 2: component identity includes the systems a package applies to.
+const MetadataSchemaVersion = 2
 
 type Components struct {
 	XMLName       xml.Name    `xml:"components"`

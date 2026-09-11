@@ -470,6 +470,62 @@ func TestDellFirmwareEntry_ToAppstream(t *testing.T) {
 	})
 }
 
+// The C6615 and R6625 iDRAC packages share device component ID 25227 but apply
+// to different systems, so they must not collapse into one component.
+func TestDellFirmwareEntry_ToAppstreamPerPlatformIdentity(t *testing.T) {
+	idracEntry := func(version string, systemIDs ...string) *DellFirmwareEntry {
+		models := make([]DellModel, 0, len(systemIDs))
+		for _, systemID := range systemIDs {
+			models = append(models, DellModel{SystemID: systemID})
+		}
+		return &DellFirmwareEntry{
+			Filename: "idrac-" + version + ".exe",
+			DellSoftwareComponent: &DellSoftwareComponent{
+				Path:          "FOLDER01/idrac-" + version + ".exe",
+				VendorVersion: version,
+				DateTime:      mustParseTime("2026-01-15T10:30:00Z"),
+				Name: DellTranslatable{
+					Display: []DellTranslatableEntry{{Lang: "en", Value: "iDRAC " + version}},
+				},
+				Description: DellTranslatable{
+					Display: []DellTranslatableEntry{{Lang: "en", Value: "iDRAC firmware"}},
+				},
+				LUCategory:       DellTranslatableWithValue{Value: "iDRAC with Lifecycle Controller"},
+				Criticality:      DellCriticality{Value: 1},
+				SupportedSystems: []DellBrand{{Models: models}},
+				SupportedDevices: []DellDevice{{
+					ComponentID:      "25227",
+					DellTranslatable: DellTranslatable{Display: []DellTranslatableEntry{{Lang: "en", Value: "iDRAC with Lifecycle Controller"}}},
+				}},
+			},
+		}
+	}
+
+	// In the real catalog 7.30.30.51 covers the C6615 (0C60), 7.30.30.54 does not.
+	c6615, err := idracEntry("7.30.30.51", "0C60", "0900").ToAppstream()
+	assert.NoError(t, err)
+	r6625, err := idracEntry("7.30.30.54", "0AF8", "0B53").ToAppstream()
+	assert.NoError(t, err)
+
+	assert.NotEqual(t, c6615[0].ID, r6625[0].ID,
+		"Packages for the same device on different platforms must be distinct components")
+	assert.NotEqual(t, c6615[0].Provides, r6625[0].Provides)
+
+	t.Run("StableAcrossVersionsForTheSamePlatforms", func(t *testing.T) {
+		next, err := idracEntry("7.40.00.00", "0C60", "0900").ToAppstream()
+		assert.NoError(t, err)
+		assert.Equal(t, c6615[0].ID, next[0].ID,
+			"A newer package for the same platforms must stay the same component so its release supersedes the previous one")
+	})
+
+	t.Run("IndependentOfSystemOrder", func(t *testing.T) {
+		reordered, err := idracEntry("7.30.30.51", "0900", "0C60").ToAppstream()
+		assert.NoError(t, err)
+		assert.Equal(t, c6615[0].ID, reordered[0].ID, "Component identity should not depend on catalog ordering")
+		assert.Equal(t, c6615[0].Provides, reordered[0].Provides, "GUIDs should be emitted in a stable order")
+	})
+}
+
 // Helper function for parsing time in tests
 func mustParseTime(timeStr string) time.Time {
 	t, err := time.Parse(time.RFC3339, timeStr)
