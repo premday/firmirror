@@ -22,5 +22,5 @@ spec:
       labels:
         {{- include "firmirror.selectorLabels" . | nindent 8 }}
     spec:
-      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.s3CleanupArgs" .)) | nindent 6 }}
+      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.s3CleanupArgs" .) "resources" .Values.jobs.resources "deadline" .Values.jobs.activeDeadlineSeconds) | nindent 6 }}
 {{- end }}

@@ -21,4 +21,4 @@ spec:
       labels:
         {{- include "firmirror.selectorLabels" . | nindent 8 }}
     spec:
-      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.publishArgs" .)) | nindent 6 }}
+      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.publishArgs" .) "resources" .Values.jobs.resources "deadline" .Values.jobs.activeDeadlineSeconds) | nindent 6 }}

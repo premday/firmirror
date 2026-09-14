@@ -122,6 +122,21 @@ resources:
     cpu: 500m
     memory: 1Gi
 
+# The on-demand jobs: promote, publish and s3-cleanup. They read and write
+# metadata documents and nothing else, so they need neither the runtime nor the
+# memory of a refresh that downloads and repackages firmware. Requests match
+# the limits so they land in the Guaranteed QoS class and are not evicted
+# part-way through writing a document.
+jobs:
+  activeDeadlineSeconds: 1800  # 30 minutes
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+
 # CronJob specific settings
 cronjob:
   # Number of successful/failed jobs to keep in history

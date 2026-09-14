@@ -179,15 +179,17 @@ Build the arguments deleting the packages nothing references any more.
 {{- end }}
 
 {{/*
-The job spec shared by the refresh CronJob and the promote CronJobs.
-Takes a dict with "root" (the chart context) and "args" (the rendered argument
-list, one YAML sequence entry per line).
+The job spec shared by every CronJob. Takes a dict with "root" (the chart
+context), "args" (the rendered argument list, one YAML sequence entry per
+line), "resources" and "deadline". The last two differ between the refresh,
+which downloads and repackages firmware for hours, and the on-demand jobs,
+which only read and write metadata.
 */}}
 {{- define "firmirror.jobSpec" -}}
 {{- $root := .root -}}
 backoffLimit: {{ $root.Values.cronjob.backoffLimit }}
-{{- if $root.Values.cronjob.activeDeadlineSeconds }}
-activeDeadlineSeconds: {{ $root.Values.cronjob.activeDeadlineSeconds }}
+{{- if .deadline }}
+activeDeadlineSeconds: {{ .deadline }}
 {{- end }}
 {{- if $root.Values.cronjob.ttlSecondsAfterFinished }}
 ttlSecondsAfterFinished: {{ $root.Values.cronjob.ttlSecondsAfterFinished }}
@@ -238,7 +240,7 @@ template:
             key: AWS_SECRET_ACCESS_KEY
       {{- end }}
       resources:
-        {{- toYaml $root.Values.resources | nindent 8 }}
+        {{- toYaml .resources | nindent 8 }}
       {{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
       volumeMounts:
       {{- if not $root.Values.storage.s3.enabled }}

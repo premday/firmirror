@@ -109,7 +109,9 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `cronjob.failedJobsHistoryLimit` | Number of failed jobs to keep | `3` |
 | `cronjob.restartPolicy` | Pod restart policy | `OnFailure` |
 | `cronjob.backoffLimit` | Number of retries before marking job as failed | `2` |
-| `cronjob.activeDeadlineSeconds` | Maximum job runtime in seconds | `7200` (2 hours) |
+| `cronjob.activeDeadlineSeconds` | Maximum refresh runtime in seconds | `7200` (2 hours) |
+| `jobs.activeDeadlineSeconds` | Maximum runtime of an on-demand job (promote, publish, s3-cleanup) | `1800` (30 minutes) |
+| `jobs.resources` | Resources for the on-demand jobs | `500m` CPU, `1Gi` memory |
 | `cronjob.ttlSecondsAfterFinished` | Time to keep finished jobs | `86400` (24 hours) |
 | `resources.limits.cpu` | CPU limit | `2000m` |
 | `resources.limits.memory` | Memory limit | `4Gi` |
