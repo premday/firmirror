@@ -6,11 +6,59 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 // LocalStorage implements Storage interface for local filesystem
 type LocalStorage struct {
 	basePath string
+}
+
+// Lock takes an advisory lock in the repository itself. flock locks are
+// released by the kernel if the process exits, so a killed run cannot leave a
+// local repository permanently locked.
+func (s *LocalStorage) Lock(ctx context.Context) (*RepositoryLock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	lockPath := filepath.Join(s.basePath, repositoryLockKey)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("opening repository lock: %w", err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		file.Close()
+		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+			return nil, ErrRepositoryLocked
+		}
+		return nil, fmt.Errorf("locking repository: %w", err)
+	}
+
+	if err := file.Truncate(0); err == nil {
+		_, _ = file.WriteString(strconv.Itoa(os.Getpid()) + "\n")
+		_ = file.Sync()
+	}
+
+	workCtx, cancelWork := context.WithCancel(ctx)
+	// The lock cannot be lost while the process runs, so what the commit
+	// context has to survive is the signal that ended the run.
+	heldCtx, cancelHeld := context.WithCancel(context.WithoutCancel(ctx))
+	return &RepositoryLock{Work: workCtx, Held: heldCtx, release: func(context.Context) error {
+		cancelWork()
+		cancelHeld()
+		unlockErr := syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		closeErr := file.Close()
+		if unlockErr != nil {
+			return fmt.Errorf("unlocking repository: %w", unlockErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("closing repository lock: %w", closeErr)
+		}
+		return nil
+	}}, nil
 }
 
 // NewLocalStorage creates a new LocalStorage instance
@@ -76,4 +124,38 @@ func (s *LocalStorage) Exists(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("failed to stat file: %w", err)
 	}
 	return true, nil
+}
+
+// List returns the objects stored under the given prefix. Local storage
+// supports listing, unlike deleting, so a local repository can still report
+// which of its packages the metadata no longer points at without ever
+// removing one.
+func (s *LocalStorage) List(ctx context.Context, prefix string) ([]StoredObject, error) {
+	var objects []StoredObject
+	err := filepath.WalkDir(s.basePath, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(s.basePath, path)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(relative)
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		objects = append(objects, StoredObject{Key: key, ModifiedAt: info.ModTime()})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+	return objects, nil
 }

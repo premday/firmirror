@@ -1,0 +1,26 @@
+{{- if .Values.storage.s3.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "firmirror.fullname" . }}-s3-cleanup
+  labels:
+    {{- include "firmirror.labels" . | nindent 4 }}
+    firmirror.premday.io/operation: s3-cleanup
+spec:
+  # Deletes the stored packages that no metadata document references any more.
+  # Suspended, and deliberately not part of the nightly refresh: mirroring
+  # firmware should never delete anything as a side effect, and a refresh that
+  # failed part-way leaves a document that does not list everything it will.
+  # Run it with `kubectl create job --from=cronjob/<name>`.
+  suspend: true
+  schedule: "0 0 31 2 *" # 31st of February: never a real date
+  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "firmirror.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.s3CleanupArgs" .)) | nindent 6 }}
+{{- end }}

@@ -1,16 +1,15 @@
 package firmirror
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/premday/firmirror/pkg/lvfs"
@@ -29,7 +28,8 @@ if [ -n "$JCAT_TOOL_LOG" ]; then
 	printf '%s\n' "$*" >> "$JCAT_TOOL_LOG"
 fi
 if [ "$1" = "self-sign" ]; then
-	: > "$2"
+	# jcat-tool imports into the JCAT it is given rather than replacing it.
+	printf 'sha256 %s\n' "$3" >> "$2"
 fi
 `
 	if err := os.WriteFile(jcatTool, []byte(script), 0755); err != nil {
@@ -79,20 +79,6 @@ func createTestSyncer(t *testing.T) (*FirmirrorSyncer, string) {
 type cleanupStorage struct {
 	*LocalStorage
 	deleteFailures map[string]int
-}
-
-func (s *cleanupStorage) List(_ context.Context, prefix string) ([]string, error) {
-	entries, err := os.ReadDir(s.basePath)
-	if err != nil {
-		return nil, err
-	}
-	keys := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
-			keys = append(keys, entry.Name())
-		}
-	}
-	return keys, nil
 }
 
 func (s *cleanupStorage) Delete(_ context.Context, key string) error {
@@ -679,30 +665,22 @@ func TestMergeComponents(t *testing.T) {
 		}},
 	}}
 
-	for _, test := range []struct {
-		name                string
-		replaceSuperseded   bool
-		wantRebuiltPackages []string
-	}{
-		{name: "retains superseded releases by default", wantRebuiltPackages: []string{"old-rebuilt.cab", "new-rebuilt.cab"}},
-		{name: "replaces superseded releases during cleanup", replaceSuperseded: true, wantRebuiltPackages: []string{"new-rebuilt.cab"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			components, superseded := mergeComponents(existing, incoming, test.replaceSuperseded)
+	t.Run("KeepsASupersededReleaseForCleanupToReplace", func(t *testing.T) {
+		components, superseded := mergeComponents(existing, incoming)
 
-			var rebuiltPackages []string
-			for _, release := range components[componentKey(incoming[0])].Releases {
-				if release.Location != "" {
-					rebuiltPackages = append(rebuiltPackages, release.Location)
-				} else {
-					rebuiltPackages = append(rebuiltPackages, release.Artifacts[0].Location)
-				}
+		var rebuiltPackages []string
+		for _, release := range components[componentKey(incoming[0])].Releases {
+			if release.Location != "" {
+				rebuiltPackages = append(rebuiltPackages, release.Location)
+			} else {
+				rebuiltPackages = append(rebuiltPackages, release.Artifacts[0].Location)
 			}
-			assert.Equal(t, test.wantRebuiltPackages, rebuiltPackages)
-			assert.Equal(t, "unrelated.cab", components[componentKey(existing.Component[1])].Releases[0].Location)
-			assert.Equal(t, []string{"old-rebuilt.cab"}, superseded)
-		})
-	}
+		}
+		assert.Equal(t, []string{"old-rebuilt.cab", "new-rebuilt.cab"}, rebuiltPackages,
+			"mirroring firmware must not orphan a package, so the rebuilt release is appended next to it")
+		assert.Equal(t, "unrelated.cab", components[componentKey(existing.Component[1])].Releases[0].Location)
+		assert.Equal(t, []string{"old-rebuilt.cab"}, superseded, "reported so the run can say what a cleanup would reclaim")
+	})
 }
 
 // Merging these would offer the R6625 iDRAC firmware to a C6615, which fwupd
@@ -727,7 +705,7 @@ func TestMergeComponentsKeepsDifferentGUIDsApart(t *testing.T) {
 		}},
 	}}}
 
-	components, superseded := mergeComponents(existing, []lvfs.Component{sameIDOtherPlatform}, true)
+	components, superseded := mergeComponents(existing, []lvfs.Component{sameIDOtherPlatform})
 
 	require.Len(t, components, 2, "Components with the same ID but different GUIDs must not be merged")
 	assert.Empty(t, superseded, "A release for other platforms supersedes nothing")
@@ -757,20 +735,10 @@ func TestMergeComponentsMergesSameGUIDs(t *testing.T) {
 		Releases: []lvfs.Release{{Version: "7.40.00.00", Location: "new.cab"}},
 	}}
 
-	components, _ := mergeComponents(existing, incoming, true)
+	components, _ := mergeComponents(existing, incoming)
 
 	require.Len(t, components, 1)
 	require.Len(t, components[componentKey(incoming[0])].Releases, 2)
-}
-
-func TestLogRetainedSupersededPackages(t *testing.T) {
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-
-	logRetainedSupersededPackages(logger, []string{"old-rebuilt.cab"})
-
-	assert.Contains(t, logs.String(), "Leaving superseded firmware package untouched because --s3.cleanup was not specified")
-	assert.Contains(t, logs.String(), "location=old-rebuilt.cab")
 }
 
 func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
@@ -1028,21 +996,15 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 		assert.Contains(t, versions, "2.0.0", "Should have version 2.0.0")
 	})
 
-	t.Run("RetriesS3CleanupOnNoOpRun", func(t *testing.T) {
+	t.Run("KeepsASupersededReleaseAndItsPackage", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		local, err := NewLocalStorage(tmpDir)
 		require.NoError(t, err)
-		storage := &cleanupStorage{
-			LocalStorage:   local,
-			deleteFailures: map[string]int{"old-firmware.cab": 1},
-		}
+		storage := &cleanupStorage{LocalStorage: local, deleteFailures: make(map[string]int)}
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "old-firmware.cab"), []byte("old"), 0644))
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "new-firmware.cab"), []byte("new"), 0644))
 
-		syncer, err := NewFirmirrorSyncer(FirmirrorConfig{
-			CacheDir:                    filepath.Join(tmpDir, "cache"),
-			CleanupUnreferencedPackages: true,
-		}, storage)
+		syncer, err := NewFirmirrorSyncer(FirmirrorConfig{CacheDir: filepath.Join(tmpDir, "cache")}, storage)
 		require.NoError(t, err)
 		syncer.existingMetadata = &lvfs.Components{Component: []lvfs.Component{{
 			ID: "com.test.firmware",
@@ -1060,32 +1022,53 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 			}},
 		}}
 
-		require.ErrorContains(t, syncer.SaveMetadata(context.Background()), "transient delete failure")
-		assert.FileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
+		logs := captureLogs(t)
+		require.NoError(t, syncer.SaveMetadata(context.Background()))
 
-		retrySyncer, err := NewFirmirrorSyncer(FirmirrorConfig{
-			CacheDir:                    filepath.Join(tmpDir, "retry-cache"),
-			CleanupUnreferencedPackages: true,
-		}, storage)
-		require.NoError(t, err)
-		require.NoError(t, retrySyncer.LoadMetadata(context.Background()))
-		require.NoError(t, retrySyncer.SaveMetadata(context.Background()))
-		assert.NoFileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
+		// Mirroring firmware neither drops a release nor deletes a package:
+		// that is what s3-cleanup is for.
+		assert.FileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
 		assert.FileExists(t, filepath.Join(tmpDir, "new-firmware.cab"))
+		index := readTestMetadata(t, syncer, IndexKey)
+		require.Len(t, index.Component, 1)
+		assert.Len(t, index.Component[0].Releases, 2)
+		assert.Contains(t, logs.String(), "kept until s3-cleanup runs")
 	})
 
-	t.Run("SkipsCleanupWhenDisabledAndNoComponentsAreNew", func(t *testing.T) {
+	t.Run("DoesNotReportAPackageItJustUploadedAsUnreferenced", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		local, err := NewLocalStorage(tmpDir)
 		require.NoError(t, err)
 		storage := &cleanupStorage{LocalStorage: local, deleteFailures: make(map[string]int)}
-		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "old-firmware.cab"), []byte("old"), 0644))
-		syncer, err := NewFirmirrorSyncer(FirmirrorConfig{CacheDir: filepath.Join(tmpDir, "cache")}, storage)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "in-flight.cab"), []byte("cab"), 0644))
+		syncer, err := NewFirmirrorSyncer(FirmirrorConfig{
+			CacheDir:      filepath.Join(tmpDir, "cache"),
+			MinPackageAge: 24 * time.Hour,
+		}, storage)
 		require.NoError(t, err)
+		logs := captureLogs(t)
 
 		require.NoError(t, syncer.SaveMetadata(context.Background()))
+
+		assert.NotContains(t, logs.String(), "run s3-cleanup to remove them",
+			"a package this run just uploaded is not an orphan")
+	})
+
+	t.Run("ReportsUnreferencedPackagesWithoutRemovingThem", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		local, err := NewLocalStorage(tmpDir)
+		require.NoError(t, err)
+		storage := &cleanupStorage{LocalStorage: local, deleteFailures: make(map[string]int)}
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "orphan.cab"), []byte("orphan"), 0644))
+		syncer, err := NewFirmirrorSyncer(FirmirrorConfig{CacheDir: filepath.Join(tmpDir, "cache")}, storage)
+		require.NoError(t, err)
+		logs := captureLogs(t)
+
+		require.NoError(t, syncer.SaveMetadata(context.Background()))
+
 		assert.NoFileExists(t, filepath.Join(tmpDir, "metadata.xml.zst"))
-		assert.FileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
+		assert.FileExists(t, filepath.Join(tmpDir, "orphan.cab"))
+		assert.Contains(t, logs.String(), "run s3-cleanup to remove them")
 	})
 
 	t.Run("AddsLocationTagsToReleases", func(t *testing.T) {

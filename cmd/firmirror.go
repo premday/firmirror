@@ -30,11 +30,14 @@ type HPEFlags struct {
 
 type S3 struct {
 	Enable   bool   `help:"Use S3 storage backend instead of local filesystem. Requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables" default:"false"`
-	Cleanup  bool   `help:"Replace rebuilt releases in metadata and delete unreferenced CAB packages from S3 after saving metadata." default:"false"`
 	Bucket   string `help:"S3 bucket name for storing firmware files"`
 	Prefix   string `help:"Optional prefix for all S3 keys" default:""`
 	Region   string `help:"AWS region" default:"us-east-1"`
 	Endpoint string `help:"Custom S3 endpoint URL (for S3-compatible services like MinIO)" default:""`
+}
+
+type S3CleanupCmd struct {
+	MinPackageAge time.Duration `help:"Keep a package that nothing references until it is at least this old. A refresh publishes the metadata naming its packages only when the run ends, so a shorter window risks deleting what a run in progress is about to publish. Set it to 0 to reclaim regardless of age." default:"24h"`
 }
 
 type Signature struct {
@@ -49,47 +52,70 @@ var args struct {
 	Signature   `embed:"" prefix:"sign." group:"Signature" help:"Metadata signing configuration."`
 	OutputDir   string `help:"Output directory for the LVFS-compatible firmware repository (ignored when using S3)" type:"path"`
 	Concurrency int    `help:"Maximum number of firmware entries downloaded and processed concurrently per vendor" default:"8"`
+	NoLock      bool   `help:"Run without taking the repository lock. The lock relies on conditional writes, which some S3-compatible endpoints do not implement; without it nothing prevents a second firmirror from writing the same repository at the same time." name:"no-lock" default:"false"`
 	Refresh     struct {
 	} `cmd:"" help:"Refresh all the firmware from the repositories. Note: this will not replace the already-existing firmware, even if the vendor pushed an updated version. You will need to delete the firmware manually."`
+	S3Cleanup S3CleanupCmd `cmd:"" name:"s3-cleanup" help:"Replace the releases a vendor rebuild superseded in the index, then delete the stored firmware packages that the metadata does not reference any more."`
 }
 
 func main() {
 	cli := kong.Parse(&args)
+
+	var err error
 	switch cli.Command() {
 	case "refresh":
+		err = runRefresh()
+	case "s3-cleanup":
+		err = runS3Cleanup()
 	default:
 		panic(cli.Command())
 	}
 
-	if err := run(); err != nil {
+	if err != nil {
 		slog.Error("firmirror exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() (runErr error) {
-	// Check if bin tools are available
-	for _, bin := range []string{"fwupdtool", "jcat-tool"} {
+func requireTools(bins ...string) error {
+	for _, bin := range bins {
 		if _, err := exec.LookPath(bin); err != nil {
 			return fmt.Errorf("%s is required but not found in PATH", bin)
 		}
 	}
+	return nil
+}
 
-	// Monitor for shutdown signal
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	defer stop()
+// lockRepository takes the lock that serializes everything writing to the
+// repository, unless the operator opted out of it.
+func lockRepository(ctx context.Context, fm *firmirror.FirmirrorSyncer) (*firmirror.RepositoryLock, error) {
+	if args.NoLock {
+		slog.Warn("Running without the repository lock, nothing prevents a concurrent firmirror from writing the same documents")
+		return firmirror.UnlockedRepository(ctx), nil
+	}
+	return fm.LockRepository(ctx)
+}
 
+func releaseRepositoryLock(lock *firmirror.RepositoryLock, runErr *error) {
+	if err := lock.Release(context.Background()); err != nil {
+		*runErr = errors.Join(*runErr, err)
+	}
+}
+
+// newSyncer performs the setup every subcommand needs: validating the signing
+// material, opening the storage backend and creating the syncer.
+func newSyncer(ctx context.Context) (*firmirror.FirmirrorSyncer, error) {
 	certProvided := args.Signature.Certificate != ""
 	keyProvided := args.Signature.PrivateKey != ""
 	if certProvided && keyProvided {
 		if _, err := os.Stat(args.Signature.Certificate); err != nil {
-			return fmt.Errorf("certificate file not accessible: %s: %w", args.Signature.Certificate, err)
+			return nil, fmt.Errorf("certificate file not accessible: %s: %w", args.Signature.Certificate, err)
 		}
 		if _, err := os.Stat(args.Signature.PrivateKey); err != nil {
-			return fmt.Errorf("private key file not accessible: %s: %w", args.Signature.PrivateKey, err)
+			return nil, fmt.Errorf("private key file not accessible: %s: %w", args.Signature.PrivateKey, err)
 		}
 	} else if certProvided || keyProvided {
-		return fmt.Errorf("both --sign.certificate and --sign.private-key must be provided together, or neither")
+		return nil, fmt.Errorf("both --sign.certificate and --sign.private-key must be provided together, or neither")
 	} else {
 		slog.Warn("No certificate or private key provided, metadata will not be signed")
 	}
@@ -100,20 +126,70 @@ func run() (runErr error) {
 	if args.S3.Enable {
 		storage, err = firmirror.NewS3Storage(ctx, args.S3.Bucket, args.S3.Prefix, args.S3.Region, args.S3.Endpoint)
 		if err != nil {
-			return fmt.Errorf("failed to create S3 storage backend: %w", err)
+			return nil, fmt.Errorf("failed to create S3 storage backend: %w", err)
 		}
 		slog.Info("Using S3 storage backend", "bucket", args.S3.Bucket, "prefix", args.S3.Prefix)
 	} else {
 		if args.OutputDir == "" {
-			return fmt.Errorf("output directory is required when using local storage")
+			return nil, fmt.Errorf("output directory is required when using local storage")
 		}
 
 		storage, err = firmirror.NewLocalStorage(args.OutputDir)
 		if err != nil {
-			return fmt.Errorf("failed to create local storage backend: %w", err)
+			return nil, fmt.Errorf("failed to create local storage backend: %w", err)
 		}
 		slog.Info("Using local filesystem storage", "path", args.OutputDir)
 	}
+
+	config := firmirror.FirmirrorConfig{
+		CacheDir:       ".firmirror_cache",
+		Certificate:    args.Signature.Certificate,
+		PrivateKey:     args.Signature.PrivateKey,
+		MaxConcurrency: args.Concurrency,
+		MinPackageAge:  args.S3Cleanup.MinPackageAge,
+	}
+
+	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create syncer: %w", err)
+	}
+	return fm, nil
+}
+
+// runS3Cleanup reclaims what mirroring firmware deliberately leaves behind.
+// Split out of refresh on purpose: a run whose job is to mirror firmware
+// should not drop a release or delete a package as a side effect, and one that
+// failed part-way leaves an index that does not yet list everything it will.
+func runS3Cleanup() (runErr error) {
+	if err := requireTools("jcat-tool"); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer stop()
+
+	fm, err := newSyncer(ctx)
+	if err != nil {
+		return err
+	}
+	lock, err := lockRepository(ctx, fm)
+	if err != nil {
+		return err
+	}
+	defer releaseRepositoryLock(lock, &runErr)
+
+	return fm.CleanupPackages(lock.Work)
+}
+
+func runRefresh() (runErr error) {
+	// Check if bin tools are available
+	if err := requireTools("fwupdtool", "jcat-tool"); err != nil {
+		return err
+	}
+
+	// Monitor for shutdown signal
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer stop()
 
 	if args.Concurrency < 1 {
 		return fmt.Errorf("concurrency must be at least 1, got %d", args.Concurrency)
@@ -123,18 +199,16 @@ func run() (runErr error) {
 		return fmt.Errorf("no vendor enabled")
 	}
 
-	config := firmirror.FirmirrorConfig{
-		CacheDir:                    ".firmirror_cache",
-		Certificate:                 args.Signature.Certificate,
-		PrivateKey:                  args.Signature.PrivateKey,
-		MaxConcurrency:              args.Concurrency,
-		CleanupUnreferencedPackages: args.S3.Cleanup,
-	}
-
-	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
+	fm, err := newSyncer(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to create syncer: %w", err)
+		return err
 	}
+	lock, err := lockRepository(ctx, fm)
+	if err != nil {
+		return err
+	}
+	defer releaseRepositoryLock(lock, &runErr)
+	ctx = lock.Work
 
 	if args.HPEFlags.Enable {
 		for _, gen := range args.HPEFlags.Gens {
@@ -152,11 +226,12 @@ func run() (runErr error) {
 	defer func() {
 		stop()
 		slog.Info("Saving repository metadata")
-		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
+		// The lock context rather than a fresh one: the metadata this run
+		// owes its repository has to be committed after the signal that
+		// ended the run, but not after the lock protecting it was lost.
+		if saveErr := fm.SaveMetadata(lock.Held); saveErr != nil {
 			slog.Error("Failed to save metadata", "error", saveErr)
-			if args.S3.Cleanup {
-				runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
-			}
+			runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
 		}
 	}()
 

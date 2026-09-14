@@ -19,6 +19,7 @@ This allows you to host your own firmware mirror that `fwupd` clients can consum
 
 - **Multi-vendor Support**: Dell (DSU catalog) and HPE (SDR repositories)
 - **Incremental Processing**: Tracks already-processed firmware to avoid re-downloading and re-processing on subsequent runs
+- **Explicit Cleanup**: a separate command resolves rebuilt packages and deletes only what no metadata document references
 - **Concurrent Downloads**: Configurable concurrency for downloading and processing firmware entries
 - **Pluggable Storage**: Local filesystem or S3 (including S3-compatible services like MinIO)
 - **Metadata Signing**: JCAT signatures with SHA256 checksums and optional PKCS#7 X.509 signatures
@@ -55,6 +56,13 @@ docker build -t firmirror .
 Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 
 ## Usage
+
+### Subcommands
+
+| Command | What it does |
+|---------|--------------|
+| `refresh` | Mirror new firmware from the vendors into the metadata index |
+| `s3-cleanup` | Replace the releases a vendor rebuild superseded, then delete the packages nothing references |
 
 ### Basic Commands
 
@@ -104,15 +112,16 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 |------|-------------|---------|
 | `--output-dir` | Output directory for the LVFS repository (local storage only) | (required) |
 | `--concurrency` | Max concurrent firmware downloads per vendor | `8` |
+| `--no-lock` | Run without the repository lock, for an S3 endpoint that does not implement conditional writes | `false` |
 | **Dell** | | |
 | `--dell.enable` | Enable Dell firmware mirroring | `false` |
 | `--dell.machines-id` | Machine System IDs to filter (4-char hex, e.g. `0C60`). Can be specified multiple times. Omit to include all firmware | (optional) |
 | **HPE** | | |
 | `--hpe.enable` | Enable HPE firmware mirroring | `false` |
 | `--hpe.gens` | Generations to fetch (`gen8`–`gen12`) | `gen8,gen9,gen10,gen11,gen12` |
+| `--min-package-age` | On `s3-cleanup`: keep a package nothing references until it is at least this old | `24h` |
 | **S3 Storage** | | |
 | `--s3.enable` | Use S3 storage backend instead of local filesystem | `false` |
-| `--s3.cleanup` | Replace rebuilt releases in metadata and delete unreferenced CAB packages from S3 after a successful metadata save | `false` |
 | `--s3.bucket` | S3 bucket name | (required if S3 enabled) |
 | `--s3.prefix` | Optional prefix for all S3 keys | `""` |
 | `--s3.region` | AWS region | `us-east-1` |
@@ -161,14 +170,44 @@ export AWS_SECRET_ACCESS_KEY=...
 
 ./firmirror refresh \
   --s3.enable \
-  --s3.cleanup \
   --s3.bucket=my-bucket \
   --s3.prefix=firmirror \
   --s3.region=eu-west-1 \
   --hpe.enable --hpe.gens=gen11
 ```
 
-S3 cleanup is opt-in. With `--s3.cleanup`, Firmirror replaces old metadata releases when their packages are rebuilt, then deletes every `.cab` object under the configured prefix that is not referenced by the updated metadata. Without the flag, rebuilt releases are appended and existing CAB objects are retained. Metadata and non-CAB objects are never deleted.
+### Cleaning up
+
+`refresh` neither drops a release nor deletes a package. When a vendor rebuilds
+a package, the new release is appended next to the one it replaces and both
+stay in the index, because dropping one there would leave its `.cab` referenced
+by nothing on a run whose job is only to mirror firmware. Each run reports what
+a cleanup would reclaim.
+
+```bash
+./firmirror s3-cleanup --s3.enable --s3.bucket=my-bucket --s3.prefix=firmirror
+```
+
+This resolves those pairs, keeping the newer release of each, and then deletes
+every `.cab` object under the prefix that the metadata does not point at.
+Metadata and non-CAB objects are never deleted. Local storage does not support
+it and says so: a local repository keeps its old packages.
+
+A package is only reclaimed once it is older than `--min-package-age`, one day
+by default. A `refresh` uploads each cabinet as it builds it and publishes the
+metadata naming them only when the whole run ends, so for the length of a run
+its cabinets sit in storage referenced by nothing. Deleting those would take
+away what the run is about to publish. Anything younger than the threshold is
+left for a later cleanup, by when the run has either published it or is long
+over and it really is an orphan. Firmirror also takes a repository lock for
+the whole refresh or cleanup, so two commands cannot race their metadata and
+package changes. S3 locks are renewable leases and abandoned leases expire.
+Losing the lease stops the run, the metadata commit it ends with included.
+
+The S3 lock relies on conditional writes (`If-None-Match` and `If-Match` on
+`PutObject`), which older S3-compatible endpoints do not implement. `--no-lock`
+runs without it, and then nothing but the operator prevents two firmirror
+commands from writing the same repository at once.
 
 ## Metadata Signing
 
@@ -218,6 +257,19 @@ helm install firmirror ./chart \
   --set storage.s3.secretName=aws-credentials
 ```
 
+### Cleaning up with Kubernetes
+
+The `-s3-cleanup` CronJob is suspended, because reclaiming packages is a
+deliberate act rather than something that should happen on a schedule.
+`contrib/firmirror-job.sh` finds it by Helm labels, fires it, waits for the Job
+and prints its logs. Pass the optional namespace and Helm release when they
+differ from `firmirror`:
+
+```bash
+contrib/firmirror-job.sh s3-cleanup my-prod-cluster
+contrib/firmirror-job.sh s3-cleanup my-prod-cluster firmware my-release
+```
+
 ## Vendor Details
 
 ### Dell
@@ -259,14 +311,16 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 │   │   ├── vendor.go             # Vendor/Catalog/FirmwareEntry interfaces
 │   │   ├── storage.go            # Storage interface
 │   │   ├── storage_local.go      # Local filesystem storage
-│   │   └── storage_s3.go         # S3 storage backend
+│   │   ├── storage_s3.go         # S3 storage backend
+│   │   ├── metadata.go           # Reading, encoding and signing metadata
+│   │   └── cleanup.go            # Reclaiming superseded releases and packages
 │   ├── lvfs/                     # LVFS AppStream XML types
 │   ├── vendors/
 │   │   ├── dell/                 # Dell vendor implementation
 │   │   └── hpe/                  # HPE vendor implementation
 │   └── utils/                    # Shared utilities (HTTP download, etc.)
 ├── chart/                        # Helm chart for Kubernetes deployment
-├── contrib/                      # Helper scripts (certificate generation)
+├── contrib/                      # Helper scripts (certificate generation, cleanup)
 └── Dockerfile                    # Multi-stage Docker build
 ```
 

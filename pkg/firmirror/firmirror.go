@@ -1,13 +1,11 @@
 package firmirror
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,16 +19,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/premday/firmirror/pkg/lvfs"
 )
 
 type FirmirrorConfig struct {
-	CacheDir                    string // Local cache directory for temporary work
-	Certificate                 string // Path to certificate file for signing metadata (.pem or .crt)
-	PrivateKey                  string // Path to private key file for signing metadata (.pem or .key)
-	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
-	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
+	CacheDir       string        // Local cache directory for temporary work
+	Certificate    string        // Path to certificate file for signing metadata (.pem or .crt)
+	PrivateKey     string        // Path to private key file for signing metadata (.pem or .key)
+	MaxConcurrency int           // Maximum number of firmware entries processed concurrently (default 1)
+	Blocklist      []string      // Firmware filenames or CAB names withheld from the published ring feeds
+	MinPackageAge  time.Duration // How long a package nothing references is kept before a cleanup may reclaim it
 }
 
 type FirmirrorSyncer struct {
@@ -47,8 +45,6 @@ func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSync
 	if err := os.MkdirAll(config.CacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory %s: %w", config.CacheDir, err)
 	}
-
-	cleanStaleWorkDirs(config.CacheDir)
 
 	return &FirmirrorSyncer{
 		Config:        config,
@@ -91,6 +87,8 @@ func (f *FirmirrorSyncer) GetNewComponentCount() int {
 // ProcessVendor processes firmware for a given vendor using the interface.
 // Entries are processed concurrently up to Config.MaxConcurrency workers.
 func (f *FirmirrorSyncer) ProcessVendor(ctx context.Context, vendor Vendor, vendorName string) error {
+	cleanStaleWorkDirs(f.Config.CacheDir)
+
 	logger := slog.With("vendor", vendorName)
 	logger.Debug("Fetching catalog")
 
@@ -346,40 +344,13 @@ func calculateChecksums(filepath string) (sha1Hash, sha256Hash string, err error
 
 // LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
 func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
-	metadataKey := "metadata.xml.zst"
-
-	// Check if metadata file exists
-	exists, err := f.Storage.Exists(ctx, metadataKey)
+	components, found, err := f.readComponents(ctx, IndexKey)
 	if err != nil {
-		return fmt.Errorf("failed to check metadata existence: %w", err)
+		return err
 	}
-	if !exists {
+	if !found {
 		slog.Info("No existing metadata found, starting fresh")
 		return nil
-	}
-
-	// Read metadata from storage
-	reader, err := f.Storage.Read(ctx, metadataKey)
-	if err != nil {
-		return fmt.Errorf("failed to read metadata file: %w", err)
-	}
-	defer reader.Close()
-
-	zstReader, err := zstd.NewReader(reader)
-	if err != nil {
-		return fmt.Errorf("failed to create zstd reader: %w", err)
-	}
-	defer zstReader.Close()
-
-	// Read and parse XML
-	data, err := io.ReadAll(zstReader)
-	if err != nil {
-		return fmt.Errorf("failed to read metadata file: %w", err)
-	}
-
-	var components lvfs.Components
-	if err := xml.Unmarshal(data, &components); err != nil {
-		return fmt.Errorf("failed to parse metadata XML: %w", err)
 	}
 
 	if components.SchemaVersion != lvfs.MetadataSchemaVersion {
@@ -390,7 +361,7 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 			"current_version", lvfs.MetadataSchemaVersion,
 			"discarded_components", len(components.Component))
 	} else {
-		f.existingMetadata = &components
+		f.existingMetadata = components
 
 		// Build index of existing firmware files from checksums
 		for _, comp := range components.Component {
@@ -412,28 +383,22 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	return nil
 }
 
-// SaveMetadata saves the combined metadata (existing + accumulated) to metadata.xml.zst
+// SaveMetadata saves the combined metadata (existing + accumulated) to
+// metadata.xml.zst. The context is the caller's: a run ended by a signal still
+// owes its repository this commit, which is why refresh hands over a context
+// that outlives the signal, but one whose repository lock is gone must not
+// write any more.
 func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
-	ctx = context.WithoutCancel(ctx)
 	logger := slog.With("component", "metadata-save")
 
 	if len(f.newComponents) == 0 {
-		if !f.Config.CleanupUnreferencedPackages {
-			logger.Info("No new component, skipping metadata update")
-			return nil
-		}
-		logger.Info("No new component, skipping metadata update and checking for stale packages")
-		return f.removeUnreferencedPackages(ctx, f.existingMetadata)
+		logger.Info("No new component, skipping metadata update and checking the stored packages")
+		f.ReportPackages(ctx)
+		return nil
 	}
 
-	componentMap, supersededLocations := mergeComponents(
-		f.existingMetadata,
-		f.newComponents,
-		f.Config.CleanupUnreferencedPackages,
-	)
-	if !f.Config.CleanupUnreferencedPackages {
-		logRetainedSupersededPackages(logger, supersededLocations)
-	}
+	componentMap, supersededLocations := mergeComponents(f.existingMetadata, f.newComponents)
+	logSupersededPackages(logger, supersededLocations)
 
 	// Build final components structure (sorted by ID for deterministic output)
 	components := &lvfs.Components{
@@ -454,66 +419,15 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		components.Component = append(components.Component, *component)
 	}
 
-	// Marshal metadata to XML
-	outBytes := []byte(xml.Header)
-	xmlBytes, err := xml.MarshalIndent(components, "", "  ")
+	compressed, err := encodeMetadata(components)
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata XML: %w", err)
+		return err
 	}
-	outBytes = append(outBytes, xmlBytes...)
-
-	// Compress metadata in-memory (avoids disk round-trip)
-	var compressedBuf bytes.Buffer
-	zstWriter, err := zstd.NewWriter(&compressedBuf)
-	if err != nil {
-		return fmt.Errorf("failed to create zstd writer: %w", err)
-	}
-	if _, err := zstWriter.Write(outBytes); err != nil {
-		return fmt.Errorf("failed to compress metadata: %w", err)
-	}
-	if err := zstWriter.Close(); err != nil {
-		return fmt.Errorf("failed to finalize zstd compression: %w", err)
+	if err := f.writeSignedMetadata(ctx, IndexKey, compressed); err != nil {
+		return err
 	}
 
-	// Write compressed data to temp file for signing (jcat-tool requires a file path)
-	compressedPath := filepath.Join(f.Config.CacheDir, "metadata.xml.zst")
-	if err := os.WriteFile(compressedPath, compressedBuf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
-	}
-	defer os.Remove(compressedPath)
-
-	// Always create a JCAT file containing checksums. When signing keys are
-	// configured, signMetadata also adds a PKCS#7 signature.
-	signaturePath := compressedPath + ".jcat"
-	if err := f.signMetadata(ctx, signaturePath, compressedPath); err != nil {
-		return fmt.Errorf("creating metadata JCAT: %w", err)
-	}
-	defer os.Remove(signaturePath)
-
-	// Write the JCAT file to storage first (metadata is the commit point).
-	sigFile, err := os.Open(signaturePath)
-	if err != nil {
-		return fmt.Errorf("failed to open metadata JCAT file: %w", err)
-	}
-	sigData, err := io.ReadAll(sigFile)
-	sigFile.Close()
-	if err != nil {
-		return fmt.Errorf("failed to read metadata JCAT file: %w", err)
-	}
-	if err := f.Storage.Write(ctx, filepath.Base(signaturePath), bytes.NewReader(sigData)); err != nil {
-		return fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
-	}
-
-	// Write compressed metadata to storage (commit point — written last)
-	if err := f.Storage.Write(ctx, "metadata.xml.zst", bytes.NewReader(compressedBuf.Bytes())); err != nil {
-		return fmt.Errorf("failed to write metadata to storage: %w", err)
-	}
-
-	// The new metadata is now committed, so unreferenced S3 packages can be
-	// removed. A later no-op run retries any transient cleanup failures.
-	if err := f.removeUnreferencedPackages(ctx, components); err != nil {
-		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
-	}
+	f.ReportPackages(ctx)
 
 	logger.Info("Metadata saved successfully",
 		"total_merged_components", len(componentMap),
@@ -562,7 +476,13 @@ func releaseContainsFirmware(release lvfs.Release, filenames map[string]struct{}
 	return false
 }
 
-func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, replaceSuperseded bool) (map[string]*lvfs.Component, []string) {
+// mergeComponents folds the components of this run into the stored ones. A
+// release whose package the vendor rebuilt is kept next to its rebuild rather
+// than dropped: dropping it would leave its package referenced by nothing, and
+// reclaiming packages is s3-cleanup's job, not a side effect of mirroring
+// firmware. The locations of the superseded releases are returned so the run
+// can report what a cleanup would reclaim.
+func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component) (map[string]*lvfs.Component, []string) {
 	componentMap := make(map[string]*lvfs.Component)
 	supersededLocations := make(map[string]struct{})
 	newFirmwareFilenames := firmwareFilenamesByComponent(incoming)
@@ -573,13 +493,10 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 			key := componentKey(component)
 			component.Releases = make([]lvfs.Release, 0, len(existingComponent.Releases))
 			for _, release := range existingComponent.Releases {
-				superseded := releaseContainsFirmware(release, newFirmwareFilenames[key])
-				if superseded {
+				if releaseContainsFirmware(release, newFirmwareFilenames[key]) {
 					collectReleaseLocations(release, supersededLocations)
 				}
-				if !superseded || !replaceSuperseded {
-					component.Releases = append(component.Releases, release)
-				}
+				component.Releases = append(component.Releases, release)
 			}
 			if len(component.Releases) > 0 {
 				componentMap[key] = &component
@@ -600,9 +517,9 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 	return componentMap, slices.Sorted(maps.Keys(supersededLocations))
 }
 
-func logRetainedSupersededPackages(logger *slog.Logger, locations []string) {
+func logSupersededPackages(logger *slog.Logger, locations []string) {
 	for _, location := range locations {
-		logger.Info("Leaving superseded firmware package untouched because --s3.cleanup was not specified", "location", location)
+		logger.Info("Firmware package superseded by a rebuild, kept until s3-cleanup runs", "location", location)
 	}
 }
 
@@ -615,82 +532,4 @@ func collectReleaseLocations(release lvfs.Release, locations map[string]struct{}
 			locations[artifact.Location] = struct{}{}
 		}
 	}
-}
-
-func (f *FirmirrorSyncer) removeUnreferencedPackages(ctx context.Context, components *lvfs.Components) error {
-	if !f.Config.CleanupUnreferencedPackages {
-		return nil
-	}
-
-	cleaner, ok := f.Storage.(packageCleaner)
-	if !ok || components == nil {
-		return nil
-	}
-
-	referencedLocations := make(map[string]struct{})
-	for _, component := range components.Component {
-		for _, release := range component.Releases {
-			collectReleaseLocations(release, referencedLocations)
-		}
-	}
-
-	keys, err := cleaner.List(ctx, "")
-	if err != nil {
-		return fmt.Errorf("listing stored packages: %w", err)
-	}
-	slices.Sort(keys)
-
-	logger := slog.With("component", "metadata-save")
-	var deleteErrors []error
-	for _, key := range keys {
-		if !strings.HasSuffix(key, ".cab") {
-			continue
-		}
-		if _, referenced := referencedLocations[key]; referenced {
-			continue
-		}
-		if err := cleaner.Delete(ctx, key); err != nil {
-			deleteErrors = append(deleteErrors, fmt.Errorf("deleting %s: %w", key, err))
-			continue
-		}
-		logger.Info("Removed unreferenced firmware package", "location", key)
-	}
-	return errors.Join(deleteErrors...)
-}
-
-// signMetadata creates a JCAT file for the given file using jcat-tool.
-// The JCAT file contains a SHA256 checksum and a signature if signing keys are provided.
-func (f *FirmirrorSyncer) signMetadata(ctx context.Context, sigPath, filePath string) error {
-	jcatTool := func(args []string, wd string) error {
-		slog.Debug("Running jcat-tool", "args", args)
-		cmd := exec.CommandContext(ctx, "jcat-tool", args...)
-		cmd.Dir = wd
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("jcat-tool failed: %w\nOutput: %s", err, output)
-		}
-		return nil
-	}
-
-	wd := filepath.Dir(filePath)
-	file := filepath.Base(filePath)
-	sig := filepath.Base(sigPath)
-
-	// A checksum-only JCAT is still required when cryptographic signing is
-	// disabled, notably because firmware.jcat is included in every CAB.
-	if err := jcatTool([]string{"self-sign", sig, file, "--kind", "sha256"}, wd); err != nil {
-		return fmt.Errorf("failed to create JCAT file with checksums: %w", err)
-	}
-
-	if f.Config.Certificate != "" && f.Config.PrivateKey != "" {
-		// Add a signature to the JCAT file using the certificate and private key.
-		// with GPG:
-		//   gpg --detach-sign --sign --armor firmware.xml.zst
-		//   jcat-tool import firmware.xml.zst.jcat firmware.xml.zst firmware.xml.zst.asc
-		if err := jcatTool([]string{"sign", sig, file, f.Config.Certificate, f.Config.PrivateKey}, wd); err != nil {
-			return fmt.Errorf("failed to add signature to JCAT file: %w", err)
-		}
-	}
-
-	return nil
 }

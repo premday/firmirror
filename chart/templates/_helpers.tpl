@@ -72,9 +72,6 @@ Storage, signing and blocklist arguments, shared by every subcommand.
 {{- define "firmirror.commonArgs" -}}
 {{- if .Values.storage.s3.enabled }}
 - "--s3.enable"
-{{- if .Values.storage.s3.cleanup }}
-- "--s3.cleanup"
-{{- end }}
 {{- if .Values.storage.s3.bucket }}
 - {{ printf "--s3.bucket=%s" .Values.storage.s3.bucket | quote }}
 {{- end }}
@@ -86,6 +83,9 @@ Storage, signing and blocklist arguments, shared by every subcommand.
 {{- end }}
 {{- if .Values.storage.s3.endpoint }}
 - {{ printf "--s3.endpoint=%s" .Values.storage.s3.endpoint | quote }}
+{{- end }}
+{{- if not .Values.storage.s3.lock }}
+- --no-lock
 {{- end }}
 {{- else }}
 - {{ printf "--output-dir=%s" .Values.storage.outputDir | quote }}
@@ -114,6 +114,14 @@ Build the firmirror command arguments
 - {{ printf "--hpe.gens=%s" .Values.vendors.hpe.gens | quote }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+Build the arguments deleting the packages nothing references any more.
+*/}}
+{{- define "firmirror.s3CleanupArgs" -}}
+- "s3-cleanup"
+{{- include "firmirror.commonArgs" . }}
 {{- end }}
 
 {{/*

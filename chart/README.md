@@ -27,6 +27,19 @@ helm install firmirror ./chart \
   --set vendors.hpe.gens="gen10,gen11"
 ```
 
+## Cleaning up
+
+A suspended `-s3-cleanup` CronJob is rendered whenever S3 storage is enabled.
+It resolves the releases a vendor rebuild superseded and deletes the packages
+nothing references, and is never run on a schedule: mirroring firmware neither
+drops a release nor deletes a package by itself. It leaves packages younger
+than a day alone, so it cannot take away what a refresh in progress is about
+to publish.
+
+`contrib/firmirror-job.sh <job> <context> [namespace] [helm-release]` finds it
+by Helm labels, runs it, waits for it and prints its logs. Firmirror's shared
+repository lock prevents it from racing the nightly refresh.
+
 ## Configuration
 
 The following table lists the configurable parameters of the Firmirror chart and their default values.
@@ -46,11 +59,11 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `vendors.hpe.gens` | Comma-separated HPE generations (gen10,gen11,gen12) | `""` |
 | `storage.outputDir` | Output directory inside container (for local storage) | `/data/firmirror` |
 | `storage.s3.enabled` | Enable S3 storage backend | `false` |
-| `storage.s3.cleanup` | Replace rebuilt metadata releases and delete unreferenced CAB packages | `false` |
 | `storage.s3.bucket` | S3 bucket name | `""` |
 | `storage.s3.prefix` | S3 prefix/path within bucket | `""` |
 | `storage.s3.region` | AWS region | `""` |
 | `storage.s3.endpoint` | Custom S3 endpoint (for MinIO, etc.) | `""` |
+| `storage.s3.lock` | Take the repository lock, which needs conditional writes; turn it off for an endpoint without them | `true` |
 | `storage.s3.secretName` | Secret containing AWS credentials | `""` |
 | `externalSecret.create` | Create an ExternalSecret resource | `false` |
 | `externalSecret.secretStoreRef` | Reference to the SecretStore | `""` |

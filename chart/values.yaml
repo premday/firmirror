@@ -32,12 +32,16 @@ storage:
   outputDir: /data/firmirror
   s3:
     enabled: false
-    # Replace rebuilt metadata releases and delete unreferenced CAB packages
-    cleanup: false
     bucket: ""
     prefix: ""
     region: ""
     endpoint: ""
+    # Take the repository lock that serializes every command writing to the
+    # repository. It is built on conditional writes, which older
+    # S3-compatible endpoints do not implement; turn it off for one of those,
+    # and then nothing but whoever runs the jobs prevents two of them from
+    # writing the same documents at once.
+    lock: true
     # secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY keys
     secretName: ""
 
