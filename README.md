@@ -23,6 +23,7 @@ This allows you to host your own firmware mirror that `fwupd` clients can consum
 - **Concurrent Downloads**: Configurable concurrency for downloading and processing firmware entries
 - **Pluggable Storage**: Local filesystem or S3 (including S3-compatible services like MinIO)
 - **Metadata Signing**: JCAT signatures with SHA256 checksums and optional PKCS#7 X.509 signatures
+- **Progressive Rollout**: per-ring metadata documents, promoted explicitly, with a blocklist to withhold a bad firmware
 - **Helm Chart**: Kubernetes CronJob deployment with S3/local storage support
 
 ## Prerequisites
@@ -61,7 +62,9 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 
 | Command | What it does |
 |---------|--------------|
-| `refresh` | Mirror new firmware from the vendors into the metadata index |
+| `refresh` | Mirror new firmware from the vendors into the index, then republish the ring feeds |
+| `promote --to=<ring> [--from=<ring>]` | Publish the state of one ring to another. See [Rings](#rings) |
+| `publish` | Republish every ring feed from its snapshot, applying the current blocklist |
 | `s3-cleanup` | Replace the releases a vendor rebuild superseded, then delete the packages nothing references |
 
 ### Basic Commands
@@ -119,6 +122,7 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | **HPE** | | |
 | `--hpe.enable` | Enable HPE firmware mirroring | `false` |
 | `--hpe.gens` | Generations to fetch (`gen8`–`gen12`) | `gen8,gen9,gen10,gen11,gen12` |
+| `--block` | Firmware withheld from the published ring feeds, as either the vendor firmware filename or the CAB name. Can be specified multiple times | (optional) |
 | `--min-package-age` | On `s3-cleanup`: keep a package nothing references until it is at least this old | `24h` |
 | **S3 Storage** | | |
 | `--s3.enable` | Use S3 storage backend instead of local filesystem | `false` |
@@ -136,17 +140,90 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 /output/dir/
 ├── <sha256>-firmware1.bin.cab    # CAB packages (prefixed with SHA256 hash)
 ├── <sha256>-firmware2.bin.cab
-├── metadata.xml.zst              # Compressed LVFS metadata
-└── metadata.xml.zst.jcat         # JCAT signature/checksum file
+├── snapshot.xml.zst              # Internal: the index, every firmware mirrored
+├── metadata.xml.zst              # Compressed LVFS metadata published from it
+├── metadata.xml.zst.jcat         # JCAT signature/checksum file
+├── snapshot-<ring>.xml.zst       # Internal: the state a ring was promoted with
+├── metadata-<ring>.xml.zst       # Compressed LVFS metadata served to that ring
+└── metadata-<ring>.xml.zst.jcat
 ```
 
 The `metadata.xml.zst` file contains the AppStream component metadata that `fwupd` uses to discover available firmware. The `.jcat` file provides integrity verification and optional signatures.
+
+The `snapshot-` and `metadata-<ring>` documents only exist once a ring has been promoted into. See [Rings](#rings).
 
 ### Incremental Updates
 
 Firmirror tracks which firmware files have already been processed in the metadata index. On subsequent runs, already-existing firmware is skipped, so only new entries are downloaded and processed.
 
 To force re-processing of a firmware, delete its CAB file and remove it from the metadata.
+
+## Rings
+
+`fwupd` has no notion of a release channel: a client installs whatever the one
+metadata document its remote points at lists. A ring is therefore its own
+metadata document, published next to the cabinets so the relative `<location>`
+of every release keeps resolving against the same packages, whichever ring a
+host is on.
+
+Every ring is two documents: the unfiltered state it holds, which is internal
+to firmirror, and the feed published from it, which is what its hosts download.
+The index is one of those rings, so the blocklist reaches the hosts reading it
+too — the ones already running whatever firmware just turned out to be bad.
+
+| Object | What it is | Written by |
+|--------|------------|------------|
+| `snapshot.xml.zst` | The index: every firmware mirrored so far, and the state promotions are made from. Internal, unsigned: clients never fetch it | `refresh` |
+| `metadata.xml.zst` | The index feed: the index minus the blocklisted releases, for hosts that want the latest firmware the day it lands | `refresh` and `publish` |
+| `snapshot-<ring>.xml.zst` | The state a ring was promoted with. Internal, unsigned: clients never fetch it | `promote` |
+| `metadata-<ring>.xml.zst` | What hosts on the ring download: the snapshot minus the blocklisted releases | `promote`, `publish`, and `refresh` at the end of each run |
+
+Ring names are free-form, and firmirror imposes no order between them: which
+ring is promoted from which is decided by whoever runs `promote`.
+
+A repository written by an earlier version has no `snapshot.xml.zst`: the first
+`refresh` or `publish` records what `metadata.xml.zst` holds as the index and
+publishes the feed from it, so nothing is mirrored again.
+
+### Promoting
+
+```bash
+# Publish today's index to the beta ring
+./firmirror promote --to=beta --s3.enable --s3.bucket=my-bucket
+
+# Once beta has run it for a while, publish what beta is serving to preview.
+# preview gets the state beta was validated on, not whatever has been mirrored
+# since.
+./firmirror promote --to=preview --from=beta --s3.enable --s3.bucket=my-bucket
+```
+
+A ring keeps serving its state until it is promoted into again, so hosts only
+move when someone decides they should. In Kubernetes each promotion is a
+suspended CronJob; `contrib/promote.sh <ring> <kube-context>` runs one.
+Add `[namespace] [helm-release]` when either differs from `firmirror`.
+
+### Withholding a bad firmware
+
+`--block` withholds firmware from every ring feed, matching either the vendor
+firmware filename or the CAB name that `fwupdmgr get-releases` reports as the
+release location:
+
+```bash
+./firmirror refresh /output/dir --dell.enable --block=BIOS_ABC12_LN_1.2.3.BIN
+```
+
+Blocked firmware stays mirrored and stays in the index and the ring snapshots,
+so removing the entry publishes it again without downloading anything. Only
+what is published is filtered, the index feed included. The blocklist is
+applied on every `refresh`, `promote` and `publish`; run `publish` to apply a
+change immediately without promoting anything:
+
+```bash
+./firmirror publish --s3.enable --s3.bucket=my-bucket
+```
+
+Every cabinet that any of these documents references is kept in storage, so a
+package only an older ring still points at survives [cleanup](#cleaning-up).
 
 ## Storage Backends
 
@@ -189,9 +266,11 @@ a cleanup would reclaim.
 ```
 
 This resolves those pairs, keeping the newer release of each, and then deletes
-every `.cab` object under the prefix that the metadata does not point at.
-Metadata and non-CAB objects are never deleted. Local storage does not support
-it and says so: a local repository keeps its old packages.
+every `.cab` object under the prefix that neither the index, nor a ring
+snapshot, nor a ring feed points at. A package only an older ring still serves
+is kept, even once the index has moved past it. Metadata and non-CAB objects
+are never deleted. Local storage does not support it and says so: a local
+repository keeps its old packages.
 
 A package is only reclaimed once it is older than `--min-package-age`, one day
 by default. A `refresh` uploads each cabinet as it builds it and publishes the
@@ -257,18 +336,30 @@ helm install firmirror ./chart \
   --set storage.s3.secretName=aws-credentials
 ```
 
-### Cleaning up with Kubernetes
+### Rings with Kubernetes
 
-The `-s3-cleanup` CronJob is suspended, because reclaiming packages is a
-deliberate act rather than something that should happen on a schedule.
-`contrib/firmirror-job.sh` finds it by Helm labels, fires it, waits for the Job
-and prints its logs. Pass the optional namespace and Helm release when they
-differ from `firmirror`:
+Each entry of the chart's `promote` list creates a CronJob that is suspended,
+because a promotion is a deliberate act rather than something that should
+happen on a schedule. `contrib/promote.sh` fires one:
+
+```bash
+contrib/promote.sh beta my-preprod-cluster   # check the hosts on beta, then
+contrib/promote.sh beta my-prod-cluster
+```
+
+The `-publish` and `-s3-cleanup` CronJobs are suspended for the same reason.
+`contrib/firmirror-job.sh` finds any of them by Helm labels and runs it, which
+is what `promote.sh` wraps. Pass the optional namespace and Helm release when
+they differ from `firmirror`:
 
 ```bash
 contrib/firmirror-job.sh s3-cleanup my-prod-cluster
 contrib/firmirror-job.sh s3-cleanup my-prod-cluster firmware my-release
+contrib/firmirror-job.sh publish    my-prod-cluster
 ```
+
+It waits for the Job and prints its logs. Firmirror's shared repository lock
+prevents it from racing the nightly refresh or another on-demand operation.
 
 ## Vendor Details
 
@@ -313,14 +404,15 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 │   │   ├── storage_local.go      # Local filesystem storage
 │   │   ├── storage_s3.go         # S3 storage backend
 │   │   ├── metadata.go           # Reading, encoding and signing metadata
-│   │   └── cleanup.go            # Reclaiming superseded releases and packages
+│   │   ├── cleanup.go            # Reclaiming superseded releases and packages
+│   │   └── rings.go              # Ring snapshots, feeds and the blocklist
 │   ├── lvfs/                     # LVFS AppStream XML types
 │   ├── vendors/
 │   │   ├── dell/                 # Dell vendor implementation
 │   │   └── hpe/                  # HPE vendor implementation
 │   └── utils/                    # Shared utilities (HTTP download, etc.)
 ├── chart/                        # Helm chart for Kubernetes deployment
-├── contrib/                      # Helper scripts (certificate generation, cleanup)
+├── contrib/                      # Helper scripts (certificates, promotion, cleanup)
 └── Dockerfile                    # Multi-stage Docker build
 ```
 

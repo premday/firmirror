@@ -27,7 +27,34 @@ helm install firmirror ./chart \
   --set vendors.hpe.gens="gen10,gen11"
 ```
 
-## Cleaning up
+## Rings
+
+Set `promote` to publish a progressive rollout. Each entry creates a suspended
+CronJob that copies the state of its `from` ring into it, so a ring serves the
+firmware that has already been running on the ring before it:
+
+```yaml
+promote:
+- name: beta      # from the index: the latest mirrored firmware
+- name: preview
+  from: beta
+- name: stable
+  from: preview
+```
+
+Clients then point their fwupd remote at `metadata-<name>.xml.zst` instead of
+`metadata.xml.zst`. Run a promotion with
+`contrib/promote.sh <ring> <context> [namespace] [helm-release]`, which is what
+fires the otherwise suspended CronJob.
+
+`contrib/firmirror-job.sh <job> <context> [namespace] [helm-release]` finds any
+of the suspended CronJobs by Helm labels, runs it, waits for it and prints its
+logs. Firmirror's shared repository lock prevents it from racing the nightly
+refresh or another on-demand operation.
+
+`blocklist` withholds firmware from every ring feed. It takes effect on the
+next nightly run or promotion; to apply it immediately, run the `-publish`
+CronJob that is rendered alongside the promote ones.
 
 A suspended `-s3-cleanup` CronJob is rendered whenever S3 storage is enabled.
 It resolves the releases a vendor rebuild superseded and deletes the packages
@@ -36,9 +63,7 @@ drops a release nor deletes a package by itself. It leaves packages younger
 than a day alone, so it cannot take away what a refresh in progress is about
 to publish.
 
-`contrib/firmirror-job.sh <job> <context> [namespace] [helm-release]` finds it
-by Helm labels, runs it, waits for it and prints its logs. Firmirror's shared
-repository lock prevents it from racing the nightly refresh.
+See the repository README for what each object in the bucket is for.
 
 ## Configuration
 
@@ -53,6 +78,8 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `image.tag` | Container image tag | `""` (Chart appVersion) |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets | `[]` |
+| `blocklist` | Firmware withheld from the published ring feeds, as vendor firmware filenames or CAB names | `[]` |
+| `promote` | Rings to publish, as `{name, from}` entries; one suspended promote CronJob each | `[]` |
 | `vendors.dell.enabled` | Enable Dell firmware sync | `false` |
 | `vendors.dell.machinesId` | Comma-separated Dell machine System IDs | `""` |
 | `vendors.hpe.enabled` | Enable HPE firmware sync | `false` |

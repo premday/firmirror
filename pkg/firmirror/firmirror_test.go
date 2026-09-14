@@ -1029,10 +1029,17 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 		// that is what s3-cleanup is for.
 		assert.FileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
 		assert.FileExists(t, filepath.Join(tmpDir, "new-firmware.cab"))
-		index := readTestMetadata(t, syncer, IndexKey)
+		index := readTestMetadata(t, syncer, snapshotKey(""))
 		require.Len(t, index.Component, 1)
 		assert.Len(t, index.Component[0].Releases, 2)
 		assert.Contains(t, logs.String(), "kept until s3-cleanup runs")
+
+		// What is published is another matter: a client offered both would
+		// have nothing to pick between the superseded cabinet and its rebuild.
+		feed := readTestMetadata(t, syncer, IndexKey)
+		require.Len(t, feed.Component, 1)
+		require.Len(t, feed.Component[0].Releases, 1)
+		assert.Equal(t, "new-firmware.cab", feed.Component[0].Releases[0].Location)
 	})
 
 	t.Run("DoesNotReportAPackageItJustUploadedAsUnreferenced", func(t *testing.T) {

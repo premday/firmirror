@@ -2,7 +2,7 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "firmirror.fullname" . }}-s3-cleanup
+  name: {{ include "firmirror.onDemandCronJobName" (dict "root" . "operation" "s3-cleanup") }}
   labels:
     {{- include "firmirror.labels" . | nindent 4 }}
     firmirror.premday.io/operation: s3-cleanup

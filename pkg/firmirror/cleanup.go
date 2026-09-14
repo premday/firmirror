@@ -1,6 +1,7 @@
 package firmirror
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -68,27 +69,6 @@ func collectComponentLocations(components *lvfs.Components, locations map[string
 	}
 }
 
-// referencedLocations collects every package location the metadata points at.
-// A package is only ever deleted when it appears nowhere here, so this has to
-// account for every document a client could be reading.
-//
-// The index is read from storage rather than taken from the caller: a run that
-// never managed to load it holds nothing in memory, and mistaking that for an
-// index pointing at nothing reports every package in the repository as
-// reclaimable.
-func (f *FirmirrorSyncer) referencedLocations(ctx context.Context) (map[string]struct{}, error) {
-	locations := make(map[string]struct{})
-	index, found, err := f.readComponents(ctx, IndexKey)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return locations, nil
-	}
-	collectComponentLocations(index, locations)
-	return locations, nil
-}
-
 // packageInventory is what any metadata document points at, against what
 // storage actually holds.
 type packageInventory struct {
@@ -98,8 +78,10 @@ type packageInventory struct {
 	tooRecent   []string
 }
 
-// takeInventory reconciles the packages every metadata document references
-// with the objects in storage.
+// takeInventory reconciles the packages the metadata references with the
+// objects in storage. The locations are the ones PublishFeeds collected from
+// the ring states it read, so they cover every document in the repository and
+// none of this depends on what the caller happens to hold in memory.
 //
 // A package nothing references is only reclaimable once it has sat there for
 // MinPackageAge. A refresh uploads every cabinet as it builds it and publishes
@@ -109,15 +91,10 @@ type packageInventory struct {
 // index it then commits would point at objects that are gone. Anything younger
 // than the threshold is therefore left for a later cleanup, by when either the
 // run has published it or the run is long over and it really is an orphan.
-func (f *FirmirrorSyncer) takeInventory(ctx context.Context) (*packageInventory, error) {
+func (f *FirmirrorSyncer) takeInventory(ctx context.Context, referenced map[string]struct{}) (*packageInventory, error) {
 	storageLister, ok := f.Storage.(lister)
 	if !ok {
 		return nil, errors.New("the storage backend cannot list its objects")
-	}
-
-	referenced, err := f.referencedLocations(ctx)
-	if err != nil {
-		return nil, err
 	}
 
 	objects, err := storageLister.List(ctx, "")
@@ -159,10 +136,10 @@ func (f *FirmirrorSyncer) takeInventory(ctx context.Context) (*packageInventory,
 // ReportPackages logs how the stored packages line up with the metadata,
 // without touching anything. Deleting is left to CleanupPackages, so a run
 // that mirrors firmware never removes a package as a side effect.
-func (f *FirmirrorSyncer) ReportPackages(ctx context.Context) {
+func (f *FirmirrorSyncer) ReportPackages(ctx context.Context, referenced map[string]struct{}) {
 	logger := slog.With("component", "packages")
 
-	inventory, err := f.takeInventory(ctx)
+	inventory, err := f.takeInventory(ctx, referenced)
 	if err != nil {
 		logger.Warn("Unable to reconcile the stored packages with the metadata", "error", err)
 		return
@@ -190,7 +167,9 @@ func (f *FirmirrorSyncer) ReportPackages(ctx context.Context) {
 
 // CleanupPackages reclaims what mirroring firmware deliberately leaves behind.
 // It replaces the releases a vendor rebuild superseded, then deletes the
-// cabinets the metadata does not point at any more.
+// cabinets that no metadata document points at any more. Everything any
+// document still references is kept, so a package only an older ring serves
+// survives.
 func (f *FirmirrorSyncer) CleanupPackages(ctx context.Context) error {
 	cleaner, ok := f.Storage.(packageCleaner)
 	if !ok {
@@ -199,7 +178,7 @@ func (f *FirmirrorSyncer) CleanupPackages(ctx context.Context) error {
 
 	logger := slog.With("component", "packages")
 
-	index, found, err := f.readComponents(ctx, IndexKey)
+	index, _, found, err := f.readRingState(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -212,24 +191,29 @@ func (f *FirmirrorSyncer) CleanupPackages(ctx context.Context) error {
 		pruned, supersededLocations := pruneSupersededReleases(index)
 		// Gate on what pruning removed rather than on the locations it
 		// freed: a superseded release carrying no location at all still has
-		// to leave the index, or every later cleanup redoes the same no-op
-		// and the index keeps advertising two releases of one firmware.
+		// to leave the index, or every later cleanup redoes the same no-op.
 		if removed := countReleases(index) - countReleases(pruned); removed > 0 {
 			compressed, err := encodeMetadata(pruned)
 			if err != nil {
 				return err
 			}
-			if err := f.writeSignedMetadata(ctx, IndexKey, compressed); err != nil {
-				return err
+			if err := f.Storage.Write(ctx, snapshotKey(""), bytes.NewReader(compressed)); err != nil {
+				return fmt.Errorf("failed to write %s to storage: %w", snapshotKey(""), err)
 			}
 			logger.Info("Replaced superseded releases in the index",
 				"releases", removed, "reclaimable_packages", len(supersededLocations))
 		}
 	}
 
-	// The inventory is taken against the documents as they are now, the
-	// pruned index included.
-	inventory, err := f.takeInventory(ctx)
+	// Republish from the committed states: the feeds stop advertising what
+	// was just pruned, and the packages to keep are the ones the documents
+	// reference as they are now.
+	referenced, err := f.PublishFeeds(ctx)
+	if err != nil {
+		return err
+	}
+
+	inventory, err := f.takeInventory(ctx, referenced)
 	if err != nil {
 		return err
 	}

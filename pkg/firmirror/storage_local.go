@@ -127,9 +127,9 @@ func (s *LocalStorage) Exists(ctx context.Context, key string) (bool, error) {
 }
 
 // List returns the objects stored under the given prefix. Local storage
-// supports listing, unlike deleting, so a local repository can still report
-// which of its packages the metadata no longer points at without ever
-// removing one.
+// supports listing, unlike deleting: ring snapshots have to be discoverable
+// for a local repository to publish its feeds, while old packages are still
+// never removed.
 func (s *LocalStorage) List(ctx context.Context, prefix string) ([]StoredObject, error) {
 	var objects []StoredObject
 	err := filepath.WalkDir(s.basePath, func(path string, entry os.DirEntry, err error) error {

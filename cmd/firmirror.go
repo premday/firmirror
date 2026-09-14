@@ -45,17 +45,26 @@ type Signature struct {
 	PrivateKey  string `help:"Path to private key file for signing metadata (.pem or .key)" type:"path"`
 }
 
+type PromoteCmd struct {
+	To   string `help:"Ring to promote into. Its snapshot is replaced by the source one, and its feed is published as metadata-<ring>.xml.zst." required:""`
+	From string `help:"Ring to promote from. Defaults to the index, which holds the latest mirrored firmware." default:""`
+}
+
 var args struct {
 	DellFlags   `embed:"" prefix:"dell." group:"Dell" help:"Dell firmware fetching."`
 	HPEFlags    `embed:"" prefix:"hpe." group:"HPE" help:"HPE firmware fetching."`
 	S3          `embed:"" prefix:"s3." group:"S3 Storage" help:"S3 storage backend configuration."`
 	Signature   `embed:"" prefix:"sign." group:"Signature" help:"Metadata signing configuration."`
-	OutputDir   string `help:"Output directory for the LVFS-compatible firmware repository (ignored when using S3)" type:"path"`
-	Concurrency int    `help:"Maximum number of firmware entries downloaded and processed concurrently per vendor" default:"8"`
-	NoLock      bool   `help:"Run without taking the repository lock. The lock relies on conditional writes, which some S3-compatible endpoints do not implement; without it nothing prevents a second firmirror from writing the same repository at the same time." name:"no-lock" default:"false"`
+	OutputDir   string   `help:"Output directory for the LVFS-compatible firmware repository (ignored when using S3)" type:"path"`
+	Concurrency int      `help:"Maximum number of firmware entries downloaded and processed concurrently per vendor" default:"8"`
+	Block       []string `help:"Firmware withheld from the published ring feeds, as either the vendor firmware filename or the CAB name. Can be specified multiple times. Blocked firmware stays mirrored, so removing an entry publishes it again without downloading anything." name:"block"`
+	NoLock      bool     `help:"Run without taking the repository lock. The lock relies on conditional writes, which some S3-compatible endpoints do not implement; without it nothing prevents a second firmirror from writing the same repository at the same time." name:"no-lock" default:"false"`
 	Refresh     struct {
 	} `cmd:"" help:"Refresh all the firmware from the repositories. Note: this will not replace the already-existing firmware, even if the vendor pushed an updated version. You will need to delete the firmware manually."`
-	S3Cleanup S3CleanupCmd `cmd:"" name:"s3-cleanup" help:"Replace the releases a vendor rebuild superseded in the index, then delete the stored firmware packages that the metadata does not reference any more."`
+	S3Cleanup S3CleanupCmd `cmd:"" name:"s3-cleanup" help:"Replace the releases a vendor rebuild superseded in the index, then delete the stored firmware packages that nothing references. Everything the index, a ring snapshot or a ring feed still points at is kept, so a package only an older ring serves is never removed."`
+	Publish   struct {
+	} `cmd:"" help:"Republish the feed of every ring from its snapshot, without promoting anything. Run it to apply a blocklist change straight away instead of waiting for the next refresh."`
+	Promote PromoteCmd `cmd:"" help:"Promote one ring into another, so hosts on the target ring get the firmware the source ring was serving. The source state is snapshotted, so a later promotion out of the target ring publishes what was validated on it rather than whatever has been mirrored since."`
 }
 
 func main() {
@@ -65,6 +74,10 @@ func main() {
 	switch cli.Command() {
 	case "refresh":
 		err = runRefresh()
+	case "promote":
+		err = runPromote()
+	case "publish":
+		err = runPublish()
 	case "s3-cleanup":
 		err = runS3Cleanup()
 	default:
@@ -146,6 +159,7 @@ func newSyncer(ctx context.Context) (*firmirror.FirmirrorSyncer, error) {
 		Certificate:    args.Signature.Certificate,
 		PrivateKey:     args.Signature.PrivateKey,
 		MaxConcurrency: args.Concurrency,
+		Blocklist:      args.Block,
 		MinPackageAge:  args.S3Cleanup.MinPackageAge,
 	}
 
@@ -154,6 +168,53 @@ func newSyncer(ctx context.Context) (*firmirror.FirmirrorSyncer, error) {
 		return nil, fmt.Errorf("failed to create syncer: %w", err)
 	}
 	return fm, nil
+}
+
+// runPromote publishes an existing state to another ring. No firmware is
+// downloaded, so only the metadata signing tool is needed.
+func runPromote() (runErr error) {
+	if err := requireTools("jcat-tool"); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer stop()
+
+	fm, err := newSyncer(ctx)
+	if err != nil {
+		return err
+	}
+	lock, err := lockRepository(ctx, fm)
+	if err != nil {
+		return err
+	}
+	defer releaseRepositoryLock(lock, &runErr)
+
+	return fm.Promote(lock.Work, args.Promote.From, args.Promote.To)
+}
+
+// runPublish applies the current blocklist to every ring feed. Nothing is
+// downloaded and no ring changes the state it serves.
+func runPublish() (runErr error) {
+	if err := requireTools("jcat-tool"); err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer stop()
+
+	fm, err := newSyncer(ctx)
+	if err != nil {
+		return err
+	}
+	lock, err := lockRepository(ctx, fm)
+	if err != nil {
+		return err
+	}
+	defer releaseRepositoryLock(lock, &runErr)
+
+	_, err = fm.PublishFeeds(lock.Work)
+	return err
 }
 
 // runS3Cleanup reclaims what mirroring firmware deliberately leaves behind.

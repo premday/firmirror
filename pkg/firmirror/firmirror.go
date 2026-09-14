@@ -1,6 +1,7 @@
 package firmirror
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -342,15 +343,22 @@ func calculateChecksums(filepath string) (sha1Hash, sha256Hash string, err error
 	return sha1Hash, sha256Hash, nil
 }
 
-// LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
+// LoadMetadata loads the index and builds an index of existing firmware
 func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
-	components, found, err := f.readComponents(ctx, IndexKey)
+	components, key, found, err := f.readRingState(ctx, "")
 	if err != nil {
 		return err
 	}
 	if !found {
 		slog.Info("No existing metadata found, starting fresh")
 		return nil
+	}
+	if key != snapshotKey("") {
+		// A repository written before the index had a snapshot of its own, or
+		// one whose snapshot was removed: the published feed is the only
+		// state left to continue from, blocklisted releases excepted, which
+		// this run mirrors again.
+		slog.Warn("No index snapshot, continuing from the published index feed", "key", key)
 	}
 
 	if components.SchemaVersion != lvfs.MetadataSchemaVersion {
@@ -383,17 +391,26 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	return nil
 }
 
-// SaveMetadata saves the combined metadata (existing + accumulated) to
-// metadata.xml.zst. The context is the caller's: a run ended by a signal still
-// owes its repository this commit, which is why refresh hands over a context
-// that outlives the signal, but one whose repository lock is gone must not
-// write any more.
+// SaveMetadata commits everything this run mirrored, on top of what the index
+// already held, and publishes the ring feeds derived from it.
+//
+// The context is the caller's: a run ended by a signal still owes its
+// repository this commit, which is why refresh hands over a context that
+// outlives the signal, but one whose repository lock is gone must stop here
+// rather than write documents another process may be writing too.
 func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	logger := slog.With("component", "metadata-save")
 
 	if len(f.newComponents) == 0 {
-		logger.Info("No new component, skipping metadata update and checking the stored packages")
-		f.ReportPackages(ctx)
+		// The index is unchanged, but the ring feeds are still republished:
+		// that is how a blocklist change takes effect, and it repairs a feed
+		// that a previous run failed to write.
+		logger.Info("No new component, skipping the index update and refreshing the ring feeds")
+		referenced, err := f.PublishFeeds(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to publish the ring feeds: %w", err)
+		}
+		f.ReportPackages(ctx, referenced)
 		return nil
 	}
 
@@ -423,11 +440,23 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := f.writeSignedMetadata(ctx, IndexKey, compressed); err != nil {
-		return err
+	// The index is the state of a ring like any other: internal, unsigned,
+	// and reaching clients only through the feed published from it, which is
+	// where the blocklist applies.
+	if err := f.Storage.Write(ctx, snapshotKey(""), bytes.NewReader(compressed)); err != nil {
+		return fmt.Errorf("failed to write %s to storage: %w", snapshotKey(""), err)
 	}
 
-	f.ReportPackages(ctx)
+	// The index is now committed, so every ring feed can be published from
+	// the state its ring holds, and the stored packages reconciled against
+	// what those states reference. A later no-op run retries transient
+	// failures.
+	referenced, err := f.PublishFeeds(ctx)
+	if err != nil {
+		return fmt.Errorf("index saved but failed to publish the ring feeds: %w", err)
+	}
+
+	f.ReportPackages(ctx, referenced)
 
 	logger.Info("Metadata saved successfully",
 		"total_merged_components", len(componentMap),

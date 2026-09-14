@@ -67,6 +67,36 @@ Get the image tag
 {{- end }}
 
 {{/*
+Create a Kubernetes-safe name for an on-demand CronJob. CronJob names may be
+at most 52 characters because the controller appends a suffix when it creates
+Jobs. Keep ordinary names readable and add a hash when truncation is needed.
+*/}}
+{{- define "firmirror.onDemandCronJobName" -}}
+{{- $raw := printf "%s-%s" (include "firmirror.fullname" .root) .operation -}}
+{{- if le (len $raw) 52 -}}
+{{- $raw -}}
+{{- else -}}
+{{- printf "%s-%s" ($raw | trunc 43 | trimSuffix "-" | trimSuffix ".") ($raw | sha256sum | trunc 8) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Create a Kubernetes-safe CronJob name for a promotion. Ordinary lowercase ring
+names remain readable. Names needing normalization or truncation receive a hash
+suffix so distinct ring names cannot collide after sanitizing.
+*/}}
+{{- define "firmirror.promoteCronJobName" -}}
+{{- $ring := required "each promote entry needs a name" .ring.name -}}
+{{- $raw := printf "%s-promote-%s" (include "firmirror.fullname" .root) $ring -}}
+{{- if and (le (len $raw) 52) (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $raw) -}}
+{{- $raw -}}
+{{- else -}}
+{{- $normalized := regexReplaceAll "[^a-z0-9.]+" (lower $raw) "-" | trimAll "-." -}}
+{{- printf "%s-%s" ($normalized | trunc 43 | trimSuffix "-" | trimSuffix ".") ($ring | sha256sum | trunc 8) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Storage, signing and blocklist arguments, shared by every subcommand.
 */}}
 {{- define "firmirror.commonArgs" -}}
@@ -94,6 +124,9 @@ Storage, signing and blocklist arguments, shared by every subcommand.
 - --sign.certificate=/secrets/signing.cert
 - --sign.private-key=/secrets/signing.key
 {{- end }}
+{{- range .Values.blocklist }}
+- {{ printf "--block=%s" . | quote }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -114,6 +147,27 @@ Build the firmirror command arguments
 - {{ printf "--hpe.gens=%s" .Values.vendors.hpe.gens | quote }}
 {{- end }}
 {{- end }}
+{{- end }}
+
+{{/*
+Build the arguments promoting one ring into another.
+Takes a dict with "root" (the chart context) and "ring" (a .Values.promote entry).
+*/}}
+{{- define "firmirror.promoteArgs" -}}
+- "promote"
+- {{ printf "--to=%s" .ring.name | quote }}
+{{- if .ring.from }}
+- {{ printf "--from=%s" .ring.from | quote }}
+{{- end }}
+{{- include "firmirror.commonArgs" .root }}
+{{- end }}
+
+{{/*
+Build the arguments republishing every ring feed.
+*/}}
+{{- define "firmirror.publishArgs" -}}
+- "publish"
+{{- include "firmirror.commonArgs" . }}
 {{- end }}
 
 {{/*

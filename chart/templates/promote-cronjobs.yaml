@@ -1,0 +1,30 @@
+{{- range .Values.promote }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "firmirror.promoteCronJobName" (dict "root" $ "ring" .) }}
+  labels:
+    {{- include "firmirror.labels" $ | nindent 4 }}
+    firmirror.premday.io/operation: promote
+    firmirror.premday.io/ring-hash: {{ .name | sha256sum | trunc 16 | quote }}
+  annotations:
+    firmirror.premday.io/ring: {{ .name | quote }}
+spec:
+  # A promotion is a deliberate act, so this CronJob never fires on its own.
+  # It exists as the Job template an operator copies with
+  # `kubectl create job --from=cronjob/...`, which is what contrib/promote.sh
+  # does: the image, credentials and storage flags then stay defined in one
+  # place instead of being retyped on the command line.
+  suspend: true
+  schedule: "0 0 31 2 *" # 31st of February: never a real date
+  successfulJobsHistoryLimit: {{ $.Values.cronjob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $.Values.cronjob.failedJobsHistoryLimit }}
+  concurrencyPolicy: Forbid # two promotions into one ring would race
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "firmirror.selectorLabels" $ | nindent 8 }}
+    spec:
+      {{- include "firmirror.jobSpec" (dict "root" $ "args" (include "firmirror.promoteArgs" (dict "root" $ "ring" .))) | nindent 6 }}
+{{- end }}

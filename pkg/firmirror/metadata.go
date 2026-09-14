@@ -16,8 +16,8 @@ import (
 	"github.com/premday/firmirror/pkg/lvfs"
 )
 
-// IndexKey is the metadata document refresh maintains: every firmware mirrored
-// so far, and the state every other document is derived from.
+// IndexKey is the feed of the index ring: what a host reading the repository
+// directly downloads, published from the state refresh maintains.
 const (
 	IndexKey        = "metadata.xml.zst"
 	signatureSuffix = ".jcat"
@@ -103,16 +103,10 @@ func (f *FirmirrorSyncer) storedMetadataMatches(ctx context.Context, key string,
 	return bytes.Equal(stored, compressed)
 }
 
-// writeSignedMetadata uploads a metadata document together with its JCAT. The
-// document goes first because the JCAT is derived from it: a signature
-// uploaded for bytes whose own upload then failed advertises a checksum for a
-// document no client can fetch, while a document whose JCAT did not make it is
-// repaired by a later run, which recreates the signature even when the
-// metadata itself did not change.
-func (f *FirmirrorSyncer) writeSignedMetadata(ctx context.Context, key string, compressed []byte) error {
-	// jcat-tool works on files, and a JCAT item is identified by the file it
-	// was created from, so the temporary file is named after the published
-	// object rather than reusing one name for every document.
+// writeMetadataSignature regenerates the JCAT even when the metadata bytes did
+// not change. That repairs a missing or stale JCAT and applies signing-key
+// rotation without forcing clients to download the metadata again.
+func (f *FirmirrorSyncer) writeMetadataSignature(ctx context.Context, key string, compressed []byte) error {
 	name := path.Base(key)
 	localPath := filepath.Join(f.Config.CacheDir, name)
 	if err := os.WriteFile(localPath, compressed, 0644); err != nil {
@@ -120,8 +114,6 @@ func (f *FirmirrorSyncer) writeSignedMetadata(ctx context.Context, key string, c
 	}
 	defer os.Remove(localPath)
 
-	// Always create a JCAT file containing checksums. When signing keys are
-	// configured, signMetadata also adds a PKCS#7 signature.
 	signaturePath := localPath + signatureSuffix
 	// jcat-tool imports into the JCAT it is handed rather than replacing it,
 	// so one left in the cache directory by a killed run would carry this
@@ -138,13 +130,24 @@ func (f *FirmirrorSyncer) writeSignedMetadata(ctx context.Context, key string, c
 	if err != nil {
 		return fmt.Errorf("failed to read %s JCAT file: %w", name, err)
 	}
-	if err := f.Storage.Write(ctx, key, bytes.NewReader(compressed)); err != nil {
-		return fmt.Errorf("failed to write %s to storage: %w", name, err)
-	}
 	if err := f.Storage.Write(ctx, key+signatureSuffix, bytes.NewReader(signature)); err != nil {
 		return fmt.Errorf("failed to write %s JCAT to storage: %w", name, err)
 	}
 	return nil
+}
+
+// writeSignedMetadata uploads a metadata document together with its JCAT. The
+// document goes first because the JCAT is derived from it: a signature
+// uploaded for bytes whose own upload then failed advertises a checksum for a
+// document no client can fetch, while a document whose JCAT did not make it is
+// repaired by the next publish, which recreates the signature even when the
+// metadata itself did not change.
+func (f *FirmirrorSyncer) writeSignedMetadata(ctx context.Context, key string, compressed []byte) error {
+	name := path.Base(key)
+	if err := f.Storage.Write(ctx, key, bytes.NewReader(compressed)); err != nil {
+		return fmt.Errorf("failed to write %s to storage: %w", name, err)
+	}
+	return f.writeMetadataSignature(ctx, key, compressed)
 }
 
 func countReleases(components *lvfs.Components) int {

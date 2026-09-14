@@ -108,7 +108,7 @@ func TestCleanupPackages(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, cab), []byte("cab"), 0644))
 		}
 		// What a refresh leaves behind once a vendor rebuilt a package.
-		writeTestMetadata(t, syncer, IndexKey, &lvfs.Components{
+		writeTestMetadata(t, syncer, snapshotKey(""), &lvfs.Components{
 			Origin:        "firmirror",
 			SchemaVersion: lvfs.MetadataSchemaVersion,
 			Component: []lvfs.Component{{
@@ -122,32 +122,70 @@ func TestCleanupPackages(t *testing.T) {
 
 		require.NoError(t, syncer.CleanupPackages(ctx))
 
-		index := readTestMetadata(t, syncer, IndexKey)
+		index := readTestMetadata(t, syncer, snapshotKey(""))
 		require.Len(t, index.Component, 1)
 		require.Len(t, index.Component[0].Releases, 1, "the superseded release is what --s3.cleanup used to replace")
 		assert.Equal(t, "new-rebuilt.cab", index.Component[0].Releases[0].Location)
 		assert.NoFileExists(t, filepath.Join(tmpDir, "old-rebuilt.cab"))
 		assert.FileExists(t, filepath.Join(tmpDir, "new-rebuilt.cab"))
-		assert.FileExists(t, filepath.Join(tmpDir, IndexKey+".jcat"), "the rewritten index is signed again")
+		assert.FileExists(t, filepath.Join(tmpDir, IndexKey+".jcat"), "the index feed is republished and signed")
+	})
+
+	t.Run("ReplacesASupersededReleaseButKeepsAPackageARingServes", func(t *testing.T) {
+		syncer, tmpDir := newCleanupSyncer(t, nil)
+		for _, cab := range []string{"old-rebuilt.cab", "new-rebuilt.cab"} {
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, cab), []byte("cab"), 0644))
+		}
+		superseded := &lvfs.Components{
+			Origin:        "firmirror",
+			SchemaVersion: lvfs.MetadataSchemaVersion,
+			Component: []lvfs.Component{{
+				ID:       "com.test.firmware",
+				Releases: []lvfs.Release{testRelease("1.0.0", "firmware.bin", "old-rebuilt.cab")},
+			}},
+		}
+		// stable was promoted while the old package was the current one.
+		writeTestMetadata(t, syncer, snapshotKey("stable"), superseded)
+		writeTestMetadata(t, syncer, feedKey("stable"), superseded)
+		writeTestMetadata(t, syncer, snapshotKey(""), &lvfs.Components{
+			Origin:        "firmirror",
+			SchemaVersion: lvfs.MetadataSchemaVersion,
+			Component: []lvfs.Component{{
+				ID: "com.test.firmware",
+				Releases: []lvfs.Release{
+					testRelease("1.0.0", "firmware.bin", "old-rebuilt.cab"),
+					testRelease("1.0.0", "firmware.bin", "new-rebuilt.cab"),
+				},
+			}},
+		})
+
+		require.NoError(t, syncer.CleanupPackages(ctx))
+
+		assert.Equal(t, []string{"1.0.0"}, releaseVersions(readTestMetadata(t, syncer, snapshotKey(""))))
+		assert.FileExists(t, filepath.Join(tmpDir, "old-rebuilt.cab"),
+			"stable still serves it, so pruning the index must not reclaim it")
 	})
 
 	t.Run("LeavesTheIndexAloneWhenNothingIsSuperseded", func(t *testing.T) {
 		syncer, tmpDir := newCleanupSyncer(t, nil)
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"), []byte("cab"), 0644))
-		writeTestMetadata(t, syncer, IndexKey, testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		writeTestMetadata(t, syncer, snapshotKey(""), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		before, err := os.ReadFile(filepath.Join(tmpDir, snapshotKey("")))
+		require.NoError(t, err)
 
 		require.NoError(t, syncer.CleanupPackages(ctx))
 
-		assert.NoFileExists(t, filepath.Join(tmpDir, IndexKey+".jcat"),
-			"an index with nothing to replace is not rewritten")
+		after, err := os.ReadFile(filepath.Join(tmpDir, snapshotKey("")))
+		require.NoError(t, err)
+		assert.Equal(t, before, after, "an index with nothing to replace is not rewritten")
 	})
 
 	t.Run("DropsASupersededReleaseThatFreesNoPackage", func(t *testing.T) {
 		syncer, _ := newCleanupSyncer(t, nil)
 		// The older release of the pair carries no location, so replacing it
-		// reclaims nothing; leaving it there would have the index advertise
-		// two releases of one firmware forever.
-		writeTestMetadata(t, syncer, IndexKey, &lvfs.Components{
+		// reclaims nothing; leaving it there would have the index carry two
+		// releases of one firmware forever.
+		writeTestMetadata(t, syncer, snapshotKey(""), &lvfs.Components{
 			Origin:        "firmirror",
 			SchemaVersion: lvfs.MetadataSchemaVersion,
 			Component: []lvfs.Component{{
@@ -161,7 +199,7 @@ func TestCleanupPackages(t *testing.T) {
 
 		require.NoError(t, syncer.CleanupPackages(ctx))
 
-		index := readTestMetadata(t, syncer, IndexKey)
+		index := readTestMetadata(t, syncer, snapshotKey(""))
 		require.Len(t, index.Component, 1)
 		require.Len(t, index.Component[0].Releases, 1)
 		assert.Equal(t, "new-rebuilt.cab", index.Component[0].Releases[0].Location)
@@ -170,22 +208,57 @@ func TestCleanupPackages(t *testing.T) {
 	t.Run("ReportsNothingReclaimableWhenTheIndexWasNeverLoaded", func(t *testing.T) {
 		syncer, tmpDir := newCleanupSyncer(t, nil)
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"), []byte("cab"), 0644))
-		writeTestMetadata(t, syncer, IndexKey, testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		writeTestMetadata(t, syncer, snapshotKey(""), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
 		// What a run whose metadata failed to load holds: nothing. The
-		// inventory has to read the stored index rather than take that for an
-		// index referencing no package at all.
+		// packages to keep come from the documents in storage, never from
+		// what the run happens to have in memory.
 		require.Nil(t, syncer.existingMetadata)
 		logs := captureLogs(t)
 
-		syncer.ReportPackages(ctx)
+		require.NoError(t, syncer.SaveMetadata(ctx))
 
 		assert.NotContains(t, logs.String(), "run s3-cleanup to remove them")
 		assert.FileExists(t, filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"))
 	})
 
+	t.Run("KeepsPackagesAnOlderRingStillPointsAt", func(t *testing.T) {
+		syncer, tmpDir := newCleanupSyncer(t, nil)
+		for _, cab := range []string{"aaa-firmware-v1.bin.cab", "bbb-firmware-v2.bin.cab", "ccc-orphan.bin.cab"} {
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, cab), []byte("cab"), 0644))
+		}
+
+		// stable still serves v1 while the index has moved on to v2.
+		writeTestMetadata(t, syncer, snapshotKey(""), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		require.NoError(t, syncer.Promote(ctx, "", "stable"))
+		index := testComponents(testRelease("2.0.0", "firmware-v2.bin", "bbb-firmware-v2.bin.cab"))
+		writeTestMetadata(t, syncer, snapshotKey(""), index)
+
+		require.NoError(t, syncer.CleanupPackages(ctx))
+
+		assert.FileExists(t, filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"), "still referenced by the stable ring")
+		assert.FileExists(t, filepath.Join(tmpDir, "bbb-firmware-v2.bin.cab"), "referenced by the index")
+		assert.NoFileExists(t, filepath.Join(tmpDir, "ccc-orphan.bin.cab"), "referenced by nothing")
+	})
+
+	t.Run("KeepsThePackagesOfARingLeftWithoutASnapshot", func(t *testing.T) {
+		syncer, tmpDir := newCleanupSyncer(t, nil)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"), []byte("cab"), 0644))
+
+		// All a ring whose snapshot was removed by hand leaves behind is the
+		// feed its hosts keep downloading.
+		writeTestMetadata(t, syncer, feedKey("stable"), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+
+		require.NoError(t, syncer.CleanupPackages(ctx))
+
+		assert.FileExists(t, filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"),
+			"stable still serves it, so the hosts on it must not get a 404")
+		assert.Equal(t, []string{"1.0.0"}, releaseVersions(readTestMetadata(t, syncer, snapshotKey("stable"))),
+			"the state it is serving is recorded, so this is the last run that has to guess it")
+	})
+
 	t.Run("ReportsAReferencedPackageThatIsMissing", func(t *testing.T) {
 		syncer, _ := newCleanupSyncer(t, nil)
-		writeTestMetadata(t, syncer, IndexKey, testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		writeTestMetadata(t, syncer, snapshotKey(""), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
 		logs := captureLogs(t)
 
 		require.NoError(t, syncer.CleanupPackages(ctx))
@@ -245,13 +318,14 @@ func TestCleanupPackages(t *testing.T) {
 
 	t.Run("NeverDeletesMetadataDocuments", func(t *testing.T) {
 		syncer, tmpDir := newCleanupSyncer(t, nil)
-		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"), []byte("cab"), 0644))
-		writeTestMetadata(t, syncer, IndexKey, testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		writeTestMetadata(t, syncer, snapshotKey(""), testComponents(testRelease("1.0.0", "firmware-v1.bin", "aaa-firmware-v1.bin.cab")))
+		require.NoError(t, syncer.Promote(ctx, "", "stable"))
 
 		require.NoError(t, syncer.CleanupPackages(ctx))
 
-		assert.FileExists(t, filepath.Join(tmpDir, IndexKey))
-		assert.FileExists(t, filepath.Join(tmpDir, "aaa-firmware-v1.bin.cab"))
+		for _, key := range []string{IndexKey, snapshotKey(""), "snapshot-stable.xml.zst", "metadata-stable.xml.zst", "metadata-stable.xml.zst.jcat"} {
+			assert.FileExists(t, filepath.Join(tmpDir, key))
+		}
 	})
 }
 
@@ -260,13 +334,13 @@ func TestLocalStorageList(t *testing.T) {
 		tmpDir := t.TempDir()
 		storage, err := NewLocalStorage(tmpDir)
 		require.NoError(t, err)
-		for _, key := range []string{"metadata.xml.zst", "metadata.xml.zst.jcat", "aaa.cab", "bbb.cab"} {
+		for _, key := range []string{"metadata.xml.zst", "snapshot-beta.xml.zst", "snapshot-stable.xml.zst", "aaa.cab"} {
 			require.NoError(t, storage.Write(context.Background(), key, bytes.NewReader([]byte("x"))))
 		}
 
-		objects, err := storage.List(context.Background(), "metadata.")
+		objects, err := storage.List(context.Background(), "snapshot-")
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"metadata.xml.zst", "metadata.xml.zst.jcat"}, objectKeys(objects))
+		assert.ElementsMatch(t, []string{"snapshot-beta.xml.zst", "snapshot-stable.xml.zst"}, objectKeys(objects))
 
 		all, err := storage.List(context.Background(), "")
 		require.NoError(t, err)

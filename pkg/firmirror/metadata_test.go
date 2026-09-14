@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/premday/firmirror/pkg/lvfs"
@@ -77,6 +78,16 @@ func releaseVersions(components *lvfs.Components) []string {
 		}
 	}
 	return versions
+}
+
+// entryNames lists what a repository directory holds, sorted.
+func entryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+	return names
 }
 
 func objectKeys(objects []StoredObject) []string {

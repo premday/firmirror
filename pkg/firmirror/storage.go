@@ -81,8 +81,9 @@ type StoredObject struct {
 }
 
 // lister is implemented by storage backends that can enumerate their objects.
-// The packages a repository must keep are checked against what is actually
-// stored, which every backend can be asked about, unlike deleting.
+// Ring snapshots are discovered rather than configured, and the packages a
+// repository must keep are checked against what is actually stored, so both
+// backends implement it.
 type lister interface {
 	List(ctx context.Context, prefix string) ([]StoredObject, error)
 }

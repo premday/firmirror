@@ -11,6 +11,28 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Firmware withheld from the published ring feeds, as either the vendor
+# firmware filename ("U30_2.90_04_02_2024.fwpkg") or the CAB name fwupd reports
+# as the release location ("<sha256>-U30_2.90_04_02_2024.fwpkg.cab"). Blocked
+# firmware stays mirrored and stays in the index and the ring snapshots, so
+# removing an entry publishes it again on the next run without downloading
+# anything. Only what is published is filtered, metadata.xml.zst included: the
+# hosts reading it are the ones already running the firmware being withheld.
+blocklist: []
+
+# Rings to publish, one suspended CronJob per entry, each promoting "from" into
+# "name". Order is whatever these entries describe; firmirror imposes none.
+# A ring is served to clients as metadata-<name>.xml.zst next to the cabinets.
+# Example, the classic dev -> beta -> preview -> stable progression where dev
+# reads the index directly:
+#   promote:
+#   - name: beta      # from the index, the latest mirrored firmware
+#   - name: preview
+#     from: beta
+#   - name: stable
+#     from: preview
+promote: []
+
 vendors:
   # Dell firmware configuration
   dell:
