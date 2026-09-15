@@ -763,6 +763,66 @@ func TestMergeComponentsMergesSameGUIDs(t *testing.T) {
 	require.Len(t, components[componentKey(incoming[0])].Releases, 2)
 }
 
+// A metadata document can legitimately hold several components with the same key:
+// LVFS publishes one component per firmware, so the same ID and GUIDs come back
+// once per version. Letting the last one win drops the rest of the history, and
+// with cleanup enabled it deletes the packages those releases pointed at.
+func TestMergeComponentsPoolsComponentsSharingAKey(t *testing.T) {
+	provides := []lvfs.Firmware{{Type: "flashed", Text: "guid-c6615"}}
+	split := func(version, location, filename string) lvfs.Component {
+		return lvfs.Component{
+			ID:       "com.dell.idrac",
+			Provides: provides,
+			Releases: []lvfs.Release{{
+				Version:   version,
+				Location:  location,
+				Checksums: []lvfs.Checksum{{Filename: filename}},
+			}},
+		}
+	}
+	existing := &lvfs.Components{Component: []lvfs.Component{
+		split("7.30.30.51", "stable.cab", "idrac-7.30.30.51.exe"),
+		split("7.40.00.00", "preview.cab", "idrac-7.40.00.00.exe"),
+		split("7.50.00.00", "untagged.cab", "idrac-7.50.00.00.exe"),
+	}}
+
+	t.Run("KeepsEveryReleaseOfEveryComponent", func(t *testing.T) {
+		components, superseded := mergeComponents(existing, nil, true)
+
+		require.Len(t, components, 1, "Components sharing a key must pool into one")
+		merged := components[componentKey(existing.Component[0])]
+		require.NotNil(t, merged)
+
+		var versions []string
+		for _, release := range merged.Releases {
+			versions = append(versions, release.Version)
+		}
+		assert.Equal(t, []string{"7.30.30.51", "7.40.00.00", "7.50.00.00"}, versions)
+		assert.Empty(t, superseded)
+	})
+
+	t.Run("StillSupersedesOnlyTheRebuiltRelease", func(t *testing.T) {
+		rebuilt := split("7.40.00.00", "", "idrac-7.40.00.00.exe")
+		rebuilt.Releases[0].Artifacts = []lvfs.Artifact{{Location: "preview-rebuilt.cab"}}
+
+		components, superseded := mergeComponents(existing, []lvfs.Component{rebuilt}, true)
+
+		merged := components[componentKey(existing.Component[0])]
+		require.NotNil(t, merged)
+
+		var locations []string
+		for _, release := range merged.Releases {
+			if release.Location != "" {
+				locations = append(locations, release.Location)
+			} else {
+				locations = append(locations, release.Artifacts[0].Location)
+			}
+		}
+		assert.Equal(t, []string{"stable.cab", "untagged.cab", "preview-rebuilt.cab"}, locations)
+		assert.Equal(t, []string{"preview.cab"}, superseded)
+	})
+}
+
 func TestLogRetainedSupersededPackages(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))

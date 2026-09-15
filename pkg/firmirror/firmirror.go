@@ -581,9 +581,18 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 					component.Releases = append(component.Releases, release)
 				}
 			}
-			if len(component.Releases) > 0 {
-				componentMap[key] = &component
+			if len(component.Releases) == 0 {
+				continue
 			}
+			if merged, ok := componentMap[key]; ok {
+				// A document can hold several components with the same key:
+				// LVFS publishes one component per firmware, so the same ID and
+				// GUIDs come back once per version. Pool their releases instead
+				// of letting the last one win.
+				merged.Releases = append(merged.Releases, component.Releases...)
+				continue
+			}
+			componentMap[key] = &component
 		}
 	}
 
