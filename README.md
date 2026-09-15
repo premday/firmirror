@@ -28,7 +28,7 @@ This allows you to host your own firmware mirror that `fwupd` clients can consum
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.27+
 - `fwupdtool` (for building CAB packages)
 - `jcat-tool` (for creating JCAT signature files)
 
