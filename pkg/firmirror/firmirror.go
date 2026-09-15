@@ -451,6 +451,10 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 				release.Location = release.Artifacts[0].Location
 			}
 		}
+		// ProcessVendor accumulates components in whatever order its workers
+		// finish in, so without this the document differs between two runs that
+		// mirrored the same firmware.
+		lvfs.SortReleases(component.Releases)
 		components.Component = append(components.Component, *component)
 	}
 

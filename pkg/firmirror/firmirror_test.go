@@ -1214,11 +1214,15 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 		err = decoder.Decode(&components)
 		require.NoError(t, err)
 
-		// Verify locations
-		releases := components.Component[0].Releases
-		assert.Regexp(t, `^[a-f0-9]{64}-firmware\.bin\.cab$`, releases[0].Location,
+		// Verify locations. Releases are published newest first, so they are
+		// looked up by version rather than by position.
+		locations := make(map[string]string)
+		for _, release := range components.Component[0].Releases {
+			locations[release.Version] = release.Location
+		}
+		assert.Regexp(t, `^[a-f0-9]{64}-firmware\.bin\.cab$`, locations["1.0.0"],
 			"Should add location based on checksum filename")
-		assert.Equal(t, "already-set.cab", releases[1].Location,
+		assert.Equal(t, "already-set.cab", locations["2.0.0"],
 			"Should preserve existing location")
 	})
 }
