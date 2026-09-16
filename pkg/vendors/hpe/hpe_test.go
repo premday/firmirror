@@ -3,6 +3,7 @@ package hpe
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,12 +14,62 @@ import (
 )
 
 func TestNewHPEVendor(t *testing.T) {
-	repo := "test-repo"
-	vendor := NewHPEVendor(repo)
+	t.Run("PublicRepository", func(t *testing.T) {
+		vendor := NewHPEVendor("test-repo", DefaultBaseURL)
 
-	assert.NotNil(t, vendor, "Vendor should not be nil")
-	expectedBaseURL := "https://downloads.linux.hpe.com/SDR/repo/test-repo"
-	assert.Equal(t, expectedBaseURL, vendor.BaseURL, "BaseURL should be correctly constructed")
+		assert.NotNil(t, vendor, "Vendor should not be nil")
+		expectedBaseURL := "https://downloads.linux.hpe.com/SDR/repo/test-repo"
+		assert.Equal(t, expectedBaseURL, vendor.BaseURL, "BaseURL should be correctly constructed")
+		assert.Equal(t, expectedBaseURL, vendor.UpstreamURL, "UpstreamURL should be the public repository")
+	})
+
+	t.Run("MirrorURL", func(t *testing.T) {
+		vendor := NewHPEVendor("fwpp-gen11", "https://mirror.example.com/SDR/repo")
+
+		assert.Equal(t, "https://mirror.example.com/SDR/repo/fwpp-gen11", vendor.BaseURL, "BaseURL should point at the mirror")
+		assert.Equal(t, "https://downloads.linux.hpe.com/SDR/repo/fwpp-gen11", vendor.UpstreamURL, "Mirroring should not move the published URL")
+	})
+
+	t.Run("MirrorDirectory", func(t *testing.T) {
+		// The trailing slash an rsync destination usually carries must not
+		// double up in the repository path.
+		vendor := NewHPEVendor("fwpp-gen11", "/srv/mirror/SDR/repo/")
+
+		assert.Equal(t, "/srv/mirror/SDR/repo/fwpp-gen11", vendor.BaseURL, "BaseURL should point at the mirror directory")
+		assert.Equal(t, "https://downloads.linux.hpe.com/SDR/repo/fwpp-gen11", vendor.UpstreamURL, "Mirroring should not move the published URL")
+	})
+}
+
+func TestHPEVendor_LocalMirror(t *testing.T) {
+	mirror := mockMirror(t)
+
+	for name, baseURL := range map[string]string{"Directory": mirror, "FileURL": "file://" + mirror} {
+		t.Run(name, func(t *testing.T) {
+			vendor := NewHPEVendor("fwpp-gen11", baseURL)
+
+			catalog, err := vendor.FetchCatalog(context.Background())
+			assert.NoError(t, err, "FetchCatalog should read the mirror directory")
+
+			entries := catalog.ListEntries()
+			assert.Len(t, entries, 2, "Catalog should contain exactly 2 entries")
+
+			for _, entry := range entries {
+				assert.Equal(t, "https://downloads.linux.hpe.com/SDR/repo/fwpp-gen11/current/"+entry.GetFilename(),
+					entry.GetSourceURL(), "The published URL should stay on the public repository")
+			}
+
+			tmpDir := t.TempDir()
+			assert.NoError(t, vendor.RetrieveFirmware(context.Background(), entries[0], tmpDir),
+				"RetrieveFirmware should copy from the mirror directory")
+
+			downloaded := filepath.Join(tmpDir, entries[0].GetFilename())
+			assert.FileExists(t, downloaded, "Firmware should be copied out of the mirror")
+			content, err := os.ReadFile(downloaded)
+			assert.NoError(t, err)
+			assert.Equal(t, "Mock firmware content for "+entries[0].GetFilename(), string(content),
+				"File content should match the mirrored firmware")
+		})
+	}
 }
 
 func TestHPEVendor_FetchCatalog(t *testing.T) {
@@ -41,6 +92,7 @@ func TestHPEVendor_FetchCatalog(t *testing.T) {
 	for filename := range hpeCatalog.Entries {
 		assert.Equal(t, ".fwpkg", filepath.Ext(filename), "Only .fwpkg files should be included")
 	}
+	assert.Equal(t, server.URL, hpeCatalog.UpstreamURL, "A vendor with no upstream should publish where it read from")
 }
 
 func TestHPEVendor_RetrieveFirmware(t *testing.T) {
@@ -229,6 +281,28 @@ func TestHPEFirmwareEntry_ToAppstream_MissingPayload(t *testing.T) {
 	_, err = entry.ToAppstream()
 	assert.Error(t, err, "Should return error when payload.json is missing")
 	assert.Contains(t, err.Error(), "file not found", "Error should mention file not found")
+}
+
+// mockMirror lays out a copy of one SDR repository on disk, the way an rsync
+// mirror of downloads.linux.hpe.com holds it, and returns the directory the
+// fwpp-<gen> repositories sit in.
+func mockMirror(t *testing.T) string {
+	mirror := t.TempDir()
+	current := filepath.Join(mirror, "fwpp-gen11", "current")
+	assert.NoError(t, os.MkdirAll(filepath.Join(current, "fwrepodata"), 0755), "Should be able to create the mirror")
+
+	catalog, err := os.ReadFile(filepath.Join("testdata", "catalog.json"))
+	assert.NoError(t, err, "Should be able to read test catalog")
+	assert.NoError(t, os.WriteFile(filepath.Join(current, "fwrepodata", "fwrepo.json"), catalog, 0644))
+
+	var entries map[string]HPECatalogEntry
+	assert.NoError(t, json.Unmarshal(catalog, &entries), "Should be able to decode test catalog")
+	for filename := range entries {
+		content := "Mock firmware content for " + filename
+		assert.NoError(t, os.WriteFile(filepath.Join(current, filename), []byte(content), 0644))
+	}
+
+	return mirror
 }
 
 // mockServer creates a test HTTP server that serves the test catalog

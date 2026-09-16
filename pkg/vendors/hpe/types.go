@@ -4,13 +4,20 @@ import "encoding/json"
 
 // HPEVendor implements the Vendor interface for HPE
 type HPEVendor struct {
+	// BaseURL is the repository the firmware is read from, which may be a
+	// mirror of the public one.
 	BaseURL string
+	// UpstreamURL is the same repository on HPE's own servers. It is the
+	// location the published metadata points at, so that mirroring from
+	// somewhere else does not rewrite the document with a URL only the
+	// mirroring host can reach.
+	UpstreamURL string
 }
 
 // HPEVendor implements the Catalog interface for HPE
 type HPECatalog struct {
-	Entries map[string]HPECatalogEntry `json:",inline"`
-	BaseURL string
+	Entries     map[string]HPECatalogEntry `json:",inline"`
+	UpstreamURL string
 }
 
 // HPEFirmwareEntry implements the FirmwareEntry interface for HPE

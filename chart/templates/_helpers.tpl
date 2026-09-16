@@ -100,11 +100,17 @@ Build the firmirror command arguments
 {{- if .Values.vendors.dell.machinesId }}
 - {{ printf "--dell.machines-id=%s" .Values.vendors.dell.machinesId | quote }}
 {{- end }}
+{{- if .Values.vendors.dell.baseUrl }}
+- {{ printf "--dell.base-url=%s" .Values.vendors.dell.baseUrl | quote }}
+{{- end }}
 {{- end }}
 {{- if .Values.vendors.hpe.enabled }}
 - "--hpe.enable"
 {{- if .Values.vendors.hpe.gens }}
 - {{ printf "--hpe.gens=%s" .Values.vendors.hpe.gens | quote }}
+{{- end }}
+{{- if .Values.vendors.hpe.baseUrl }}
+- {{ printf "--hpe.base-url=%s" .Values.vendors.hpe.baseUrl | quote }}
 {{- end }}
 {{- end }}
 {{- end }}

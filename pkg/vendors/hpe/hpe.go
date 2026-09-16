@@ -19,10 +19,20 @@ import (
 	"github.com/premday/firmirror/pkg/utils"
 )
 
-// NewHPEVendor creates a new HPE vendor instance
-func NewHPEVendor(repo string) *HPEVendor {
+// DefaultBaseURL is the public HPE SDR repository holding one fwpp-<gen>
+// repository per server generation.
+const DefaultBaseURL = "https://downloads.linux.hpe.com/SDR/repo"
+
+// NewHPEVendor creates a new HPE vendor instance reading repo from baseURL.
+//
+// baseURL is a copy of SDR/repo: an HTTP(S) URL, a file:// URL, or a plain
+// directory, so an rsync mirror can be read where it sits. Whichever it is, the
+// published metadata keeps pointing at the public repository, because that is
+// where a host reading the mirror can go to read about the firmware.
+func NewHPEVendor(repo, baseURL string) *HPEVendor {
 	return &HPEVendor{
-		BaseURL: "https://downloads.linux.hpe.com/SDR/repo/" + repo,
+		BaseURL:     strings.TrimSuffix(baseURL, "/") + "/" + repo,
+		UpstreamURL: DefaultBaseURL + "/" + repo,
 	}
 }
 
@@ -50,7 +60,12 @@ func (hv *HPEVendor) fetchCatalog(ctx context.Context) (*HPECatalog, error) {
 	if err != nil {
 		return nil, err
 	}
-	catalog.BaseURL = hv.BaseURL
+	// A vendor built by hand, with no upstream of its own, publishes the
+	// location it read the firmware from.
+	catalog.UpstreamURL = hv.UpstreamURL
+	if catalog.UpstreamURL == "" {
+		catalog.UpstreamURL = hv.BaseURL
+	}
 	return catalog, nil
 }
 
@@ -74,8 +89,8 @@ func (hv *HPEVendor) filterCatalog(catalog *HPECatalog) *HPECatalog {
 	}
 
 	filteredCatalog := &HPECatalog{
-		Entries: filteredEntries,
-		BaseURL: catalog.BaseURL,
+		Entries:     filteredEntries,
+		UpstreamURL: catalog.UpstreamURL,
 	}
 	return filteredCatalog
 }
@@ -119,7 +134,7 @@ func (hc *HPECatalog) ListEntries() []firmirror.FirmwareEntry {
 		entries = append(entries, &HPEFirmwareEntry{
 			Filename:  filename,
 			Entry:     &entry,
-			SourceURL: hc.BaseURL + "/current/" + filename,
+			SourceURL: hc.UpstreamURL + "/current/" + filename,
 		})
 	}
 	return entries

@@ -24,9 +24,16 @@ import (
 // Catalog component types the Redfish update service can flash.
 var updatableComponentTypes = []string{"FRMW", "BIOS"}
 
-func NewDellVendor(systemIDs []string) *DellVendor {
+// NewDellVendor creates a new Dell vendor instance reading the catalog and the
+// firmware from baseURL.
+//
+// baseURL is a copy of that site: an HTTP(S) URL, a file:// URL, or a plain
+// directory, so an rsync mirror can be read where it sits. The published
+// metadata is unaffected either way, because it points at the location the
+// catalog itself names.
+func NewDellVendor(systemIDs []string, baseURL string) *DellVendor {
 	vendor := &DellVendor{
-		BaseURL:   "https://dl.dell.com",
+		BaseURL:   strings.TrimSuffix(baseURL, "/"),
 		SystemIDs: systemIDs,
 	}
 
@@ -135,7 +142,9 @@ func (dc *DellCatalog) ListEntries() []firmirror.FirmwareEntry {
 		entries = append(entries, &DellFirmwareEntry{
 			Filename:              filepath.Base(fw.Path),
 			DellSoftwareComponent: &fw,
-			SourceURL:             dc.BaseLocation + "/" + fw.Path,
+			// The catalog names the location Dell publishes on, which is
+			// where a host reading the mirror can read about the firmware.
+			SourceURL: dc.BaseLocation + "/" + fw.Path,
 		})
 	}
 	return entries

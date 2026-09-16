@@ -18,6 +18,11 @@ vendors:
     # Comma-separated list of Dell machine System IDs (4-character codes)
     # Example: "0C60,0C61,0A2C"
     machinesId: ""
+    # A copy of https://dl.dell.com to read the catalog and the firmware from,
+    # such as an internal mirror. An HTTP(S) URL, a file:// URL, or a plain
+    # directory: a mirror kept in a volume is read where it sits.
+    # Example: "https://mirror.example.com/dell"
+    baseUrl: ""
 
   # HPE firmware configuration
   hpe:
@@ -26,6 +31,11 @@ vendors:
     # Valid values: gen10, gen11, gen12
     # Example: "gen10,gen11"
     gens: ""
+    # A copy of https://downloads.linux.hpe.com/SDR/repo to read the firmware
+    # from, such as an internal mirror. An HTTP(S) URL, a file:// URL, or a
+    # plain directory holding the fwpp-<gen> repositories.
+    # Example: "https://mirror.example.com/SDR/repo"
+    baseUrl: ""
 
 storage:
   # Output directory inside the container

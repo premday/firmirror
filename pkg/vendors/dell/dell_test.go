@@ -1,6 +1,7 @@
 package dell
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/xml"
@@ -13,6 +14,48 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
+
+// mockMirror lays out a copy of the Dell download site on disk, the way an
+// rsync mirror of it holds it, and returns the directory the catalog sits in.
+func mockMirror(t *testing.T) string {
+	mirror := t.TempDir()
+	assert.NoError(t, os.MkdirAll(filepath.Join(mirror, "catalog"), 0755), "Should be able to create the mirror")
+
+	catalog, err := os.ReadFile(filepath.Join("testdata", "catalog.xml"))
+	assert.NoError(t, err, "Should be able to read test catalog")
+	encoded := utf16LE(catalog)
+
+	catalogFile, err := os.Create(filepath.Join(mirror, "catalog", "catalog.xml.gz"))
+	assert.NoError(t, err, "Should be able to create the mirrored catalog")
+	defer catalogFile.Close()
+
+	gzipWriter := gzip.NewWriter(catalogFile)
+	_, err = gzipWriter.Write(encoded)
+	assert.NoError(t, err, "Should be able to gzip catalog content")
+	assert.NoError(t, gzipWriter.Close())
+
+	// The firmware sits at the path the catalog gives, below the same root.
+	parsed, err := parseDellCatalog(bytes.NewReader(encoded))
+	assert.NoError(t, err, "Should be able to decode test catalog")
+	for _, component := range parsed.SoftwareComponents {
+		path := filepath.Join(mirror, filepath.FromSlash(component.Path))
+		assert.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		content := "Mock Dell firmware content for " + filepath.Base(component.Path)
+		assert.NoError(t, os.WriteFile(path, []byte(content), 0644))
+	}
+
+	return mirror
+}
+
+// utf16LE encodes the catalog the way Dell publishes it, so the parser meets
+// the same bytes it meets in production.
+func utf16LE(content []byte) []byte {
+	encoded := []byte{0xFF, 0xFE} // BOM for UTF-16LE
+	for _, b := range content {
+		encoded = append(encoded, b, 0x00)
+	}
+	return encoded
+}
 
 // mockServer creates a test HTTP server that serves the test catalog
 func mockServer(t *testing.T) *httptest.Server {
@@ -28,13 +71,7 @@ func mockServer(t *testing.T) *httptest.Server {
 		}
 
 		// Convert to UTF-16 Little Endian with BOM as expected by Dell's parser
-		// Add BOM for UTF-16LE
-		utf16Content := []byte{0xFF, 0xFE} // BOM for UTF-16LE
-
-		// Convert each byte to UTF-16LE
-		for _, b := range content {
-			utf16Content = append(utf16Content, b, 0x00)
-		}
+		utf16Content := utf16LE(content)
 
 		// Serve as gzipped content
 		w.Header().Set("Content-Type", "application/x-gzip")
@@ -68,30 +105,78 @@ func mockServer(t *testing.T) *httptest.Server {
 }
 
 func TestNewDellVendor(t *testing.T) {
+	expectedBaseURL := "https://dl.dell.com"
+
 	t.Run("WithSystemIDs", func(t *testing.T) {
 		systemIDs := []string{"0C60", "0C61"}
-		vendor := NewDellVendor(systemIDs)
+		vendor := NewDellVendor(systemIDs, expectedBaseURL)
 
 		assert.NotNil(t, vendor, "Vendor should not be nil")
-		assert.Equal(t, "https://dl.dell.com", vendor.BaseURL, "BaseURL should be set correctly")
+		assert.Equal(t, expectedBaseURL, vendor.BaseURL, "BaseURL should be set correctly")
 		assert.Equal(t, systemIDs, vendor.SystemIDs, "SystemIDs should be set correctly")
 	})
 
 	t.Run("WithoutSystemIDs", func(t *testing.T) {
-		vendor := NewDellVendor(nil)
+		vendor := NewDellVendor(nil, expectedBaseURL)
 
 		assert.NotNil(t, vendor, "Vendor should not be nil")
-		assert.Equal(t, "https://dl.dell.com", vendor.BaseURL, "BaseURL should be set correctly")
+		assert.Equal(t, expectedBaseURL, vendor.BaseURL, "BaseURL should be set correctly")
 		assert.Nil(t, vendor.SystemIDs, "SystemIDs should be nil")
 	})
 
 	t.Run("WithEmptySystemIDs", func(t *testing.T) {
-		vendor := NewDellVendor([]string{})
+		vendor := NewDellVendor([]string{}, expectedBaseURL)
 
 		assert.NotNil(t, vendor, "Vendor should not be nil")
-		assert.Equal(t, "https://dl.dell.com", vendor.BaseURL, "BaseURL should be set correctly")
+		assert.Equal(t, expectedBaseURL, vendor.BaseURL, "BaseURL should be set correctly")
 		assert.Empty(t, vendor.SystemIDs, "SystemIDs should be empty")
 	})
+
+	t.Run("WithMirrorURL", func(t *testing.T) {
+		vendor := NewDellVendor(nil, "https://mirror.example.com/dell")
+
+		assert.Equal(t, "https://mirror.example.com/dell", vendor.BaseURL, "BaseURL should point at the mirror")
+	})
+
+	t.Run("WithMirrorDirectory", func(t *testing.T) {
+		// The trailing slash an rsync destination usually carries must not
+		// double up in the catalog path.
+		vendor := NewDellVendor(nil, "/srv/mirror/dell/")
+
+		assert.Equal(t, "/srv/mirror/dell", vendor.BaseURL, "BaseURL should point at the mirror directory")
+	})
+}
+
+func TestDellVendor_LocalMirror(t *testing.T) {
+	mirror := mockMirror(t)
+
+	for name, baseURL := range map[string]string{"Directory": mirror, "FileURL": "file://" + mirror} {
+		t.Run(name, func(t *testing.T) {
+			vendor := NewDellVendor([]string{"0C60"}, baseURL)
+
+			catalog, err := vendor.FetchCatalog(context.Background())
+			assert.NoError(t, err, "FetchCatalog should read the mirror directory")
+
+			entries := catalog.ListEntries()
+			assert.NotEmpty(t, entries, "Catalog should hold the mirrored components")
+
+			for _, entry := range entries {
+				assert.Contains(t, entry.GetSourceURL(), "https://dl.dell.com/",
+					"The published URL should stay on the location the catalog names")
+			}
+
+			tmpDir := t.TempDir()
+			assert.NoError(t, vendor.RetrieveFirmware(context.Background(), entries[0], tmpDir),
+				"RetrieveFirmware should copy from the mirror directory")
+
+			downloaded := filepath.Join(tmpDir, entries[0].GetFilename())
+			assert.FileExists(t, downloaded, "Firmware should be copied out of the mirror")
+			content, err := os.ReadFile(downloaded)
+			assert.NoError(t, err)
+			assert.Equal(t, "Mock Dell firmware content for "+entries[0].GetFilename(), string(content),
+				"File content should match the mirrored firmware")
+		})
+	}
 }
 
 func TestDellVendor_FetchCatalog(t *testing.T) {
