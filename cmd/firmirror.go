@@ -21,11 +21,13 @@ import (
 type DellFlags struct {
 	Enable     bool     `help:"Enable Dell firmware fetching." default:"false"`
 	MachinesID []string `help:"List of machine IDs to fetch firmware for. They are composed of 4 characters in hexadecimal representing the machine type. For example: \"0C60\" for \"3168\" corresponding to the C6615 series of servers. You can also specify \"*\" to fetch all the firmware, but this may take a very long time."`
+	BaseURL    string   `help:"Read the catalog and the firmware from this copy of https://dl.dell.com instead of the site itself. It takes an HTTP(S) URL, a file:// URL, or a plain directory, so an rsync mirror can be read where it sits. The published metadata is unchanged: it points at the location the catalog itself names." default:"https://dl.dell.com"`
 }
 
 type HPEFlags struct {
-	Enable bool     `help:"Enable HPE firmware fetching." default:"false"`
-	Gens   []string `help:"List of generations to fetch firmware for." default:"gen8,gen9,gen10,gen11,gen12" enum:"gen8,gen9,gen10,gen11,gen12"`
+	Enable  bool     `help:"Enable HPE firmware fetching." default:"false"`
+	Gens    []string `help:"List of generations to fetch firmware for." default:"gen8,gen9,gen10,gen11,gen12" enum:"gen8,gen9,gen10,gen11,gen12"`
+	BaseURL string   `help:"Read the firmware from this copy of https://downloads.linux.hpe.com/SDR/repo instead of the SDR repository itself. It takes an HTTP(S) URL, a file:// URL, or a plain directory, so an rsync mirror can be read where it sits. It is the directory holding the fwpp-<gen> repositories, and the published metadata keeps pointing at the public one." default:"https://downloads.linux.hpe.com/SDR/repo"`
 }
 
 type S3 struct {
@@ -139,13 +141,13 @@ func run() (runErr error) {
 	if args.HPEFlags.Enable {
 		for _, gen := range args.HPEFlags.Gens {
 			hpeRepo := "fwpp-" + gen
-			hpeVendor := hpe.NewHPEVendor(hpeRepo)
+			hpeVendor := hpe.NewHPEVendor(hpeRepo, args.HPEFlags.BaseURL)
 			fm.RegisterVendor("hpe-"+gen, hpeVendor)
 		}
 	}
 
 	if args.DellFlags.Enable {
-		dellVendor := dell.NewDellVendor(args.DellFlags.MachinesID)
+		dellVendor := dell.NewDellVendor(args.DellFlags.MachinesID, args.DellFlags.BaseURL)
 		fm.RegisterVendor("dell", dellVendor)
 	}
 

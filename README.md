@@ -107,9 +107,11 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | **Dell** | | |
 | `--dell.enable` | Enable Dell firmware mirroring | `false` |
 | `--dell.machines-id` | Machine System IDs to filter (4-char hex, e.g. `0C60`). Can be specified multiple times. Omit to include all firmware | (optional) |
+| `--dell.base-url` | Copy of `https://dl.dell.com` to read from: an HTTP(S) URL, a `file://` URL, or a directory | (the site itself) |
 | **HPE** | | |
 | `--hpe.enable` | Enable HPE firmware mirroring | `false` |
 | `--hpe.gens` | Generations to fetch (`gen8`–`gen12`) | `gen8,gen9,gen10,gen11,gen12` |
+| `--hpe.base-url` | Copy of `https://downloads.linux.hpe.com/SDR/repo` to read from: an HTTP(S) URL, a `file://` URL, or a directory | (the SDR repository itself) |
 | **S3 Storage** | | |
 | `--s3.enable` | Use S3 storage backend instead of local filesystem | `false` |
 | `--s3.cleanup` | Replace rebuilt releases in metadata and delete unreferenced CAB packages from S3 after a successful metadata save | `false` |
@@ -237,6 +239,35 @@ Machine IDs are 4-character hexadecimal codes representing Dell machine types (e
 ### HPE
 
 Fetches firmware from HPE SDR repositories (`https://downloads.linux.hpe.com/SDR/repo/`). Supports Gen8 through Gen12 servers. Only `.fwpkg` packages are included (the LVFS-compatible format for HPE firmware).
+
+### Reading from a local mirror
+
+Both vendors publish their repository over rsync as well as over HTTP, as
+[HPE](https://downloads.linux.hpe.com/) documents, so a site that already keeps
+a copy can mirror from that copy instead of from the vendor. `--hpe.base-url`
+and `--dell.base-url` take whatever the copy is reachable as: an HTTP(S) URL, a
+`file://` URL, or a plain directory, which is read where it sits with no web
+server in front of it.
+
+```bash
+# Mirror from directories kept up to date with rsync
+./firmirror refresh /output \
+  --hpe.enable --hpe.gens=gen11 --hpe.base-url=/srv/mirror/SDR/repo \
+  --dell.enable --dell.machines-id=0C60 --dell.base-url=/srv/mirror/dell
+
+# Or from an internal web server
+./firmirror refresh /output \
+  --hpe.enable --hpe.gens=gen11 --hpe.base-url=https://mirror.example.com/SDR/repo
+```
+
+The HPE base is the directory the `fwpp-<gen>` repositories sit in; the Dell one
+is the directory `catalog/catalog.xml.gz` sits in.
+
+Where the firmware is read from does not change what is published: the metadata
+keeps pointing at the vendor's own location, which is the one a host reading the
+repository can follow. Switching an existing mirror to a local copy therefore
+rewrites nothing and costs no re-mirror. The firmware itself is still copied
+into a temporary directory to be repackaged, so the mirror is only ever read.
 
 ## Development
 

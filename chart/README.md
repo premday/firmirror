@@ -42,8 +42,10 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `imagePullSecrets` | Image pull secrets | `[]` |
 | `vendors.dell.enabled` | Enable Dell firmware sync | `false` |
 | `vendors.dell.machinesId` | Comma-separated Dell machine System IDs | `""` |
+| `vendors.dell.baseUrl` | Copy of `https://dl.dell.com` to read from (URL, `file://` URL or directory) | `""` |
 | `vendors.hpe.enabled` | Enable HPE firmware sync | `false` |
 | `vendors.hpe.gens` | Comma-separated HPE generations (gen10,gen11,gen12) | `""` |
+| `vendors.hpe.baseUrl` | Copy of `https://downloads.linux.hpe.com/SDR/repo` to read from (URL, `file://` URL or directory) | `""` |
 | `storage.outputDir` | Output directory inside container (for local storage) | `/data/firmirror` |
 | `storage.s3.enabled` | Enable S3 storage backend | `false` |
 | `storage.s3.cleanup` | Replace rebuilt metadata releases and delete unreferenced CAB packages | `false` |
