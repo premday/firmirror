@@ -103,6 +103,7 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--output-dir` | Output directory for the LVFS repository (local storage only) | (required) |
+| `--firmware-base-url` | Public URL the output is served from (the remote's `FirmwareBaseURI`). Packages are then named by absolute URL in the metadata | `""` (bare file names) |
 | `--concurrency` | Max concurrent firmware downloads per vendor | `8` |
 | **Dell** | | |
 | `--dell.enable` | Enable Dell firmware mirroring | `false` |
@@ -134,6 +135,22 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 ```
 
 The `metadata.xml.zst` file contains the AppStream component metadata that `fwupd` uses to discover available firmware. The `.jcat` file provides integrity verification and optional signatures.
+
+### Configuring the fwupd remote
+
+Point a remote at the published directory in `/etc/fwupd/remotes.d/firmirror.conf`:
+
+```ini
+[fwupd Remote]
+Enabled=true
+MetadataURI=https://mirror.example.com/fwupd/metadata.xml.zst
+FirmwareBaseURI=https://mirror.example.com/fwupd/
+```
+
+A remote that sets `FirmwareBaseURI` needs `--firmware-base-url=https://mirror.example.com/fwupd/` on
+`firmirror refresh`. Without it the metadata holds bare file names, and fwupd fails the update with
+`failed to parse url '<sha256>-<file>.cab'`. A remote without `FirmwareBaseURI` resolves the bare names
+next to `MetadataURI` and needs no flag. Changing the flag rewrites the stored locations on the next run.
 
 ### Incremental Updates
 

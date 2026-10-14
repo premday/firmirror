@@ -31,6 +31,7 @@ type FirmirrorConfig struct {
 	PrivateKey                  string // Path to private key file for signing metadata (.pem or .key)
 	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
+	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
 }
 
 type FirmirrorSyncer struct {
@@ -40,9 +41,14 @@ type FirmirrorSyncer struct {
 	existingMetadata *lvfs.Components // Loaded metadata from existing metadata.xml.gz
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
 	newComponents    []lvfs.Component // Components accumulated during this run
+	locationsStale   bool             // Loaded metadata locations differ from what the current FirmwareBaseURL publishes
 }
 
 func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSyncer, error) {
+	if err := validateFirmwareBaseURL(config.FirmwareBaseURL); err != nil {
+		return nil, err
+	}
+
 	// Create cache directory if it doesn't exist
 	if err := os.MkdirAll(config.CacheDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory %s: %w", config.CacheDir, err)
@@ -390,7 +396,12 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 			"current_version", lvfs.MetadataSchemaVersion,
 			"discarded_components", len(components.Component))
 	} else {
-		f.existingMetadata = &components
+		// Locations go back to the name the package is stored under, whatever
+		// base URL an earlier run published them with.
+		_, f.locationsStale = rewriteLocations(&components, func(location string) string {
+			return f.publishedLocation(bareLocation(location))
+		})
+		f.existingMetadata, _ = rewriteLocations(&components, bareLocation)
 
 		// Build index of existing firmware files from checksums
 		for _, comp := range components.Component {
@@ -417,7 +428,7 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	logger := slog.With("component", "metadata-save")
 
-	if len(f.newComponents) == 0 {
+	if len(f.newComponents) == 0 && !f.locationsStale {
 		if !f.Config.CleanupUnreferencedPackages {
 			logger.Info("No new component, skipping metadata update")
 			return nil
@@ -460,7 +471,8 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 
 	// Marshal metadata to XML
 	outBytes := []byte(xml.Header)
-	xmlBytes, err := xml.MarshalIndent(components, "", "  ")
+	published, _ := rewriteLocations(components, f.publishedLocation)
+	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata XML: %w", err)
 	}
