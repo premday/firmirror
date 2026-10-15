@@ -9,7 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -17,7 +17,7 @@ import (
 // S3Storage implements Storage interface for AWS S3 or S3-compatible storage
 type S3Storage struct {
 	client   *s3.Client
-	uploader *manager.Uploader
+	uploader *transfermanager.Client
 	bucket   string
 	prefix   string // optional prefix for all keys
 }
@@ -53,7 +53,7 @@ func NewS3Storage(ctx context.Context, bucket, prefix, region, endpoint string) 
 
 	return &S3Storage{
 		client:   client,
-		uploader: manager.NewUploader(client),
+		uploader: transfermanager.New(client),
 		bucket:   bucket,
 		prefix:   prefix,
 	}, nil
@@ -80,7 +80,7 @@ func (s *S3Storage) Write(ctx context.Context, key string, data io.Reader) error
 
 	const maxRetries = 3
 	for attempt := range maxRetries {
-		_, err = s.uploader.Upload(ctx, &s3.PutObjectInput{
+		_, err = s.uploader.UploadObject(ctx, &transfermanager.UploadObjectInput{
 			Bucket: aws.String(s.bucket),
 			Key:    aws.String(fullKey),
 			Body:   bytes.NewReader(buf),
