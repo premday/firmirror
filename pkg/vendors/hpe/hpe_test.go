@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -357,4 +358,48 @@ func createMockHPEFirmware(t *testing.T, dir string) string {
 	assert.NoError(t, err, "Should be able to write payload JSON")
 
 	return firmwarePath
+}
+
+func TestBuildAppStream_SystemBoardTarget(t *testing.T) {
+	const (
+		romClass = "aa148d2e-6e09-453e-bc6f-63baa5f5ccc4"
+		// The GUID fwupd computes for the pair
+		romPair  = "ff42598d-de00-580f-9493-b5750b62cbeb"
+		ieTarget = "a6b1a447-382a-5a4f-3c10-3c100a000303"
+	)
+	payload := func(class, target string) HPEPayload {
+		return HPEPayload{
+			DeviceClass: class,
+			Devices: HPEDevices{Device: []HPEDevice{{
+				DeviceName:     "Device",
+				Target:         target,
+				Version:        "1.0",
+				FirmwareImages: []HPEFirmwareImage{{InstallDurationSec: 1}},
+			}}},
+		}
+	}
+	provides := func(t *testing.T, fw HPEPayload) []string {
+		component, err := buildAppStream(fw, nil)
+		assert.NoError(t, err)
+		var guids []string
+		for _, p := range component.Provides {
+			guids = append(guids, p.Text)
+		}
+		return guids
+	}
+
+	t.Run("SystemROMUsesClassAndTarget", func(t *testing.T) {
+		assert.Equal(t, []string{romPair}, provides(t, payload(romClass, systemBoardTarget)),
+			"Neither the shared target nor the class on its own must be published")
+		assert.Equal(t, []string{romPair}, provides(t, payload(strings.ToUpper(romClass), systemBoardTarget)),
+			"The class is lower cased, as fwupd does")
+	})
+
+	t.Run("SystemROMWithoutDeviceClassKeepsTarget", func(t *testing.T) {
+		assert.Equal(t, []string{systemBoardTarget}, provides(t, payload("", systemBoardTarget)))
+	})
+
+	t.Run("OtherTargetsUntouched", func(t *testing.T) {
+		assert.Equal(t, []string{ieTarget}, provides(t, payload("c734e171-8721-48c9-9ed6-d5bc7da5ef8d", ieTarget)))
+	})
 }
