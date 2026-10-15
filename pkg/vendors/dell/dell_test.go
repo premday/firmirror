@@ -501,7 +501,7 @@ func TestDellFirmwareEntry_ToAppstream(t *testing.T) {
 					},
 				},
 				LUCategory:  DellTranslatableWithValue{Value: "BIOS"},
-				Criticality:  DellCriticality{Value: 2},
+				Criticality: DellCriticality{Value: 2},
 				SupportedSystems: []DellBrand{
 					{Models: []DellModel{{SystemID: "0C60"}}},
 				},
