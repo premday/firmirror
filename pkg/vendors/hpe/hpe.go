@@ -14,10 +14,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/premday/firmirror/pkg/firmirror"
 	"github.com/premday/firmirror/pkg/lvfs"
 	"github.com/premday/firmirror/pkg/utils"
 )
+
+// systemBoardTarget is the system ROM target. Redfish also lists it for other
+// devices of the board, and the device class is shared by every platform's ROM,
+// so only the class and target pair identifies the ROM.
+//
+// FIXME: other targets are shared too. Once fwupd's pair instance ID
+// (https://github.com/fwupd/fwupd/pull/11207) is in the versions people run,
+// publish the pair for every package with a device class and drop this special
+// case. Until then a fwupd without it matches no firmware published this way.
+const systemBoardTarget = "00000000-0000-0000-0000-000000000204"
+
+// pairGUID is the GUID fwupd gives a device for its HPE class and target pair:
+// the UUIDv5, in the DNS namespace, of the lower case
+// REDFISH\VENDOR_HPE&CLASS_<class>&TARGET_<target>.
+func pairGUID(deviceClass, target string) string {
+	id := `REDFISH\VENDOR_HPE&CLASS_` + strings.ToLower(deviceClass) + `&TARGET_` + strings.ToLower(target)
+	return uuid.NewSHA1(uuid.NameSpaceDNS, []byte(id)).String()
+}
 
 // DefaultBaseURL is the public HPE SDR repository holding one fwpp-<gen>
 // repository per server generation.
@@ -195,11 +214,13 @@ func buildAppStream(fw HPEPayload, catalogEntry *HPECatalogEntry) (*lvfs.Compone
 	var devices []string
 	for _, dev := range fw.Devices.Device {
 		devices = append(devices, dev.DeviceName)
-		// TODO:properly create GUID
-		// deviceclass ?
+		guid := dev.Target
+		if guid == systemBoardTarget && fw.DeviceClass != "" {
+			guid = pairGUID(fw.DeviceClass, dev.Target)
+		}
 		out.Provides = append(out.Provides, lvfs.Firmware{
 			Type: "flashed",
-			Text: dev.Target,
+			Text: guid,
 		})
 	}
 	slices.Sort(devices)
