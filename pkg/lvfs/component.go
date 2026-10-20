@@ -17,3 +17,22 @@ func ComponentKey(component Component) string {
 	slices.Sort(guids)
 	return component.ID + "\n" + strings.Join(slices.Compact(guids), ",")
 }
+
+// PoolByKey puts together the pieces a component was published in, keeping the
+// order of their first appearance. The releases are copied, so appending to a
+// pooled component never writes into the slices it was given.
+func PoolByKey(components []Component) []Component {
+	pooled := make([]Component, 0, len(components))
+	index := make(map[string]int, len(components))
+	for _, component := range components {
+		key := ComponentKey(component)
+		if at, ok := index[key]; ok {
+			pooled[at].Releases = append(pooled[at].Releases, component.Releases...)
+			continue
+		}
+		index[key] = len(pooled)
+		component.Releases = slices.Clone(component.Releases)
+		pooled = append(pooled, component)
+	}
+	return pooled
+}

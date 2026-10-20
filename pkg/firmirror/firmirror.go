@@ -613,7 +613,9 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 	newFirmwareFilenames := firmwareFilenamesByComponent(incoming)
 
 	if existing != nil {
-		for _, existingComponent := range existing.Component {
+		// LVFS publishes one component per firmware, so a document can hold several
+		// with the same key. Pool them instead of letting the last one win.
+		for _, existingComponent := range lvfs.PoolByKey(existing.Component) {
 			component := existingComponent
 			key := lvfs.ComponentKey(component)
 			component.Releases = make([]lvfs.Release, 0, len(existingComponent.Releases))
@@ -629,20 +631,12 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 			if len(component.Releases) == 0 {
 				continue
 			}
-			if merged, ok := componentMap[key]; ok {
-				// A document can hold several components with the same key:
-				// LVFS publishes one component per firmware, so the same ID and
-				// GUIDs come back once per version. Pool their releases instead
-				// of letting the last one win.
-				merged.Releases = append(merged.Releases, component.Releases...)
-				continue
-			}
 			componentMap[key] = &component
 		}
 	}
 
-	for _, incomingComponent := range incoming {
-		component := incomingComponent
+	// Pooled too, so that merging never appends into the caller's slices.
+	for _, component := range lvfs.PoolByKey(incoming) {
 		key := lvfs.ComponentKey(component)
 		if existingComponent, ok := componentMap[key]; ok {
 			existingComponent.Releases = append(existingComponent.Releases, component.Releases...)
