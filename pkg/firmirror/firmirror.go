@@ -594,7 +594,17 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 
 	digest := sha256.Sum256(outBytes)
 	if f.stored.known() && f.stored.document == digest {
-		return false, nil
+		// A write that stopped between the JCAT and the metadata leaves a JCAT that
+		// is not the metadata's, which clients reject, and nothing else replaces it.
+		matches, err := f.storedJCATMatches(ctx)
+		switch {
+		case err != nil:
+			slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", err)
+		case matches:
+			return false, nil
+		default:
+			slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
+		}
 	}
 
 	// Compress metadata in-memory (avoids disk round-trip)
