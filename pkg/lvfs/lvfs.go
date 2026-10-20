@@ -49,11 +49,19 @@ type Release struct {
 	Version         string      `xml:"version,attr"`
 	Date            string      `xml:"date,attr"`
 	InstallDuration int         `xml:"install_duration,attr"`
+	Sizes           []Size      `xml:"size,omitempty"`
 	Location        string      `xml:"location,omitempty"`
 	Checksums       []Checksum  `xml:"checksum"`
 	Description     Description `xml:"description"`
 	Issues          []Issue     `xml:"issues>issue,omitempty"`
 	Artifacts       []Artifact  `xml:"artifacts>artifact,omitempty"`
+}
+
+// Size is a size in bytes of a release: installed is what the firmware takes
+// once unpacked, download is the package fwupd fetches.
+type Size struct {
+	Type  string `xml:"type,attr"`
+	Bytes int64  `xml:",chardata"`
 }
 
 type Artifact struct {
