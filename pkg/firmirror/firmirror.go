@@ -566,6 +566,15 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 	return document, supersededLocations
 }
 
+// renderMetadata is the XML a document is published as.
+func (f *FirmirrorSyncer) renderMetadata(document *lvfs.Components) ([]byte, error) {
+	xmlBytes, err := xml.MarshalIndent(rewriteLocations(document, f.publishedLocation), "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metadata XML: %w", err)
+	}
+	return append([]byte(xml.Header), xmlBytes...), nil
+}
+
 // writeMetadata compresses, signs and stores the document, and reports whether
 // it had to be written at all. The JCAT goes first and the metadata last, as the
 // commit point.
@@ -575,16 +584,13 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 // every client compares the JCAT to decide whether to download the metadata
 // again.
 func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (bool, error) {
-	// Marshal metadata to XML
-	outBytes := []byte(xml.Header)
-	published := rewriteLocations(document, f.publishedLocation)
-	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
+	outBytes, err := f.renderMetadata(document)
 	if err != nil {
-		return false, fmt.Errorf("failed to marshal metadata XML: %w", err)
+		return false, err
 	}
-	outBytes = append(outBytes, xmlBytes...)
 
-	if f.stored.known() && f.stored.document == sha256.Sum256(outBytes) {
+	digest := sha256.Sum256(outBytes)
+	if f.stored.known() && f.stored.document == digest {
 		return false, nil
 	}
 
@@ -617,12 +623,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	defer os.Remove(signaturePath)
 
 	// Write the JCAT file to storage first (metadata is the commit point).
-	sigFile, err := os.Open(signaturePath)
-	if err != nil {
-		return false, fmt.Errorf("failed to open metadata JCAT file: %w", err)
-	}
-	sigData, err := io.ReadAll(sigFile)
-	sigFile.Close()
+	sigData, err := os.ReadFile(signaturePath)
 	if err != nil {
 		return false, fmt.Errorf("failed to read metadata JCAT file: %w", err)
 	}
@@ -635,7 +636,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 		return false, fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
 
-	f.stored = fingerprintOf(outBytes, compressedBuf.Bytes())
+	f.stored = fingerprint{document: digest, file: fileChecksum(compressedBuf.Bytes())}
 	return true, nil
 }
 
