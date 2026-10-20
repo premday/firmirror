@@ -1250,3 +1250,20 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 			"Should preserve existing location")
 	})
 }
+
+func TestMergeComponentsDoesNotWriteIntoTheComponentsItIsGiven(t *testing.T) {
+	piece := func(versions ...string) lvfs.Component {
+		releases := make([]lvfs.Release, 0, 4)
+		for _, version := range versions {
+			releases = append(releases, lvfs.Release{Version: version})
+		}
+		return lvfs.Component{ID: "com.test.firmware", Releases: releases}
+	}
+	incoming := []lvfs.Component{piece("1.0", "2.0"), piece("3.0")}
+
+	merged, _ := mergeComponents(nil, incoming, false)
+
+	assert.Len(t, merged["com.test.firmware\n"].Releases, 3)
+	assert.Equal(t, "2.0", incoming[0].Releases[:3][1].Version)
+	assert.Empty(t, incoming[0].Releases[:3][2].Version, "the incoming components keep the releases they had")
+}
