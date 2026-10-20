@@ -25,6 +25,12 @@ import (
 	"github.com/premday/firmirror/pkg/lvfs"
 )
 
+// The published document, and the JCAT clients verify it with.
+const (
+	metadataKey = "metadata.xml.zst"
+	jcatKey     = metadataKey + ".jcat"
+)
+
 type FirmirrorConfig struct {
 	CacheDir                    string // Local cache directory for temporary work
 	Certificate                 string // Path to certificate file for signing metadata (.pem or .crt)
@@ -42,8 +48,29 @@ type FirmirrorSyncer struct {
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
 	newComponents    []lvfs.Component // Components accumulated during this run
 
-	storedDocument  [sha256.Size]byte // Digest of the document read from storage
-	hasStoredDigest bool
+	stored fingerprint // Of the document in storage, as of the last time it was read or written
+}
+
+// fingerprint identifies a published document by the digest of its XML, which a
+// render is compared with, and by the SHA-256 of the compressed file, which is
+// what its JCAT records. The zero value is no document.
+type fingerprint struct {
+	document [sha256.Size]byte
+	file     string
+}
+
+func fingerprintOf(document, compressed []byte) fingerprint {
+	return fingerprint{document: sha256.Sum256(document), file: fileChecksum(compressed)}
+}
+
+// fileChecksum is the SHA-256 of a published file, as its JCAT records it.
+func fileChecksum(compressed []byte) string {
+	sum := sha256.Sum256(compressed)
+	return hex.EncodeToString(sum[:])
+}
+
+func (p fingerprint) known() bool {
+	return p.file != ""
 }
 
 func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSyncer, error) {
@@ -365,45 +392,78 @@ func calculateChecksums(filepath string) (sha1Hash, sha256Hash string, err error
 	return sha1Hash, sha256Hash, nil
 }
 
-// LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
-func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
-	metadataKey := "metadata.xml.zst"
-
-	// Check if metadata file exists
+// readStoredFile reads the published file, compressed. It reports false when
+// storage holds none.
+func (f *FirmirrorSyncer) readStoredFile(ctx context.Context) ([]byte, bool, error) {
 	exists, err := f.Storage.Exists(ctx, metadataKey)
 	if err != nil {
-		return fmt.Errorf("failed to check metadata existence: %w", err)
+		return nil, false, fmt.Errorf("failed to check metadata existence: %w", err)
 	}
 	if !exists {
-		slog.Info("No existing metadata found, starting fresh")
-		return nil
+		return nil, false, nil
 	}
 
-	// Read metadata from storage
 	reader, err := f.Storage.Read(ctx, metadataKey)
 	if err != nil {
-		return fmt.Errorf("failed to read metadata file: %w", err)
+		return nil, false, fmt.Errorf("failed to read metadata file: %w", err)
 	}
 	defer reader.Close()
-
-	zstReader, err := zstd.NewReader(reader)
+	compressed, err := io.ReadAll(reader)
 	if err != nil {
-		return fmt.Errorf("failed to create zstd reader: %w", err)
+		return nil, false, fmt.Errorf("failed to read compressed metadata file: %w", err)
+	}
+	return compressed, true, nil
+}
+
+func decompress(compressed []byte) ([]byte, error) {
+	zstReader, err := zstd.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
 	}
 	defer zstReader.Close()
-
-	// Read and parse XML
 	data, err := io.ReadAll(zstReader)
 	if err != nil {
-		return fmt.Errorf("failed to read metadata file: %w", err)
+		return nil, fmt.Errorf("failed to read metadata file: %w", err)
 	}
-	f.storedDocument = sha256.Sum256(data)
-	f.hasStoredDigest = true
+	return data, nil
+}
+
+type storedMetadata struct {
+	components  *lvfs.Components
+	fingerprint fingerprint
+}
+
+// readStored reads and parses the published document, or returns nil when
+// storage holds none.
+func (f *FirmirrorSyncer) readStored(ctx context.Context) (*storedMetadata, error) {
+	compressed, exists, err := f.readStoredFile(ctx)
+	if err != nil || !exists {
+		return nil, err
+	}
+	data, err := decompress(compressed)
+	if err != nil {
+		return nil, err
+	}
 
 	var components lvfs.Components
 	if err := xml.Unmarshal(data, &components); err != nil {
-		return fmt.Errorf("failed to parse metadata XML: %w", err)
+		return nil, fmt.Errorf("failed to parse metadata XML: %w", err)
 	}
+	return &storedMetadata{components: &components, fingerprint: fingerprintOf(data, compressed)}, nil
+}
+
+// LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
+func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
+	stored, err := f.readStored(ctx)
+	if err != nil {
+		return err
+	}
+	if stored == nil {
+		slog.Info("No existing metadata found, starting fresh")
+		return nil
+	}
+	components := stored.components
+	f.stored = stored.fingerprint
 
 	if components.SchemaVersion != lvfs.MetadataSchemaVersion {
 		// Drop the components too, not just the index: they are built
@@ -415,7 +475,7 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	} else {
 		// Locations go back to the name the package is stored under, whatever
 		// base URL an earlier run published them with.
-		f.existingMetadata = rewriteLocations(&components, bareLocation)
+		f.existingMetadata = rewriteLocations(components, bareLocation)
 
 		// Build index of existing firmware files from checksums
 		for _, comp := range components.Component {
@@ -524,7 +584,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	}
 	outBytes = append(outBytes, xmlBytes...)
 
-	if f.hasStoredDigest && f.storedDocument == sha256.Sum256(outBytes) {
+	if f.stored.known() && f.stored.document == sha256.Sum256(outBytes) {
 		return false, nil
 	}
 
@@ -542,7 +602,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	}
 
 	// Write compressed data to temp file for signing (jcat-tool requires a file path)
-	compressedPath := filepath.Join(f.Config.CacheDir, "metadata.xml.zst")
+	compressedPath := filepath.Join(f.Config.CacheDir, metadataKey)
 	if err := os.WriteFile(compressedPath, compressedBuf.Bytes(), 0644); err != nil {
 		return false, fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
 	}
@@ -566,17 +626,16 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	if err != nil {
 		return false, fmt.Errorf("failed to read metadata JCAT file: %w", err)
 	}
-	if err := f.Storage.Write(ctx, filepath.Base(signaturePath), bytes.NewReader(sigData)); err != nil {
+	if err := f.Storage.Write(ctx, jcatKey, bytes.NewReader(sigData)); err != nil {
 		return false, fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
 	}
 
 	// Write compressed metadata to storage (commit point — written last)
-	if err := f.Storage.Write(ctx, "metadata.xml.zst", bytes.NewReader(compressedBuf.Bytes())); err != nil {
+	if err := f.Storage.Write(ctx, metadataKey, bytes.NewReader(compressedBuf.Bytes())); err != nil {
 		return false, fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
 
-	f.storedDocument = sha256.Sum256(outBytes)
-	f.hasStoredDigest = true
+	f.stored = fingerprintOf(outBytes, compressedBuf.Bytes())
 	return true, nil
 }
 
