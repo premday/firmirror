@@ -3,7 +3,7 @@ FROM golang:1.26 AS builder
 WORKDIR /build
 COPY . /build
 
-RUN CGO_ENABLED=0 go build -ldflags '-s -w -extldflags "-static"' -o firmirror ./cmd/firmirror.go
+RUN CGO_ENABLED=0 go build -ldflags '-s -w -extldflags "-static"' -o firmirror ./cmd
 
 FROM debian:stable-slim
 

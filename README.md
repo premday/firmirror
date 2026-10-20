@@ -41,7 +41,7 @@ sudo apt install fwupd jcat
 ### From Source
 
 ```bash
-go build -o firmirror ./cmd/firmirror.go
+go build -o firmirror ./cmd
 ```
 
 ### Docker
