@@ -28,8 +28,11 @@ func TestMain(m *testing.M) {
 if [ -n "$JCAT_TOOL_LOG" ]; then
 	printf '%s\n' "$*" >> "$JCAT_TOOL_LOG"
 fi
+# Write a JCAT as jcat-tool does: gzipped JSON with a SHA-256 blob (kind 1) of the
+# file.
 if [ "$1" = "self-sign" ]; then
-	: > "$2"
+	sum=$(sha256sum "$3" | cut -d' ' -f1)
+	printf '{"JcatVersionMajor":0,"JcatVersionMinor":1,"Items":[{"Id":"%s","Blobs":[{"Kind":1,"Flags":1,"Data":"%s"}]}]}' "$3" "$sum" | gzip -c > "$2"
 fi
 `
 	if err := os.WriteFile(jcatTool, []byte(script), 0755); err != nil {
