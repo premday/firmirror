@@ -57,6 +57,11 @@ signing:
   certKey: ""
   pkeyKey: ""
 
+# Public URL the output is served from, as the fwupd remote's FirmwareBaseURI.
+# The metadata then names packages by absolute URL, not bare file name.
+# Example: "https://mirror.example.com/fwupd/"
+firmwareBaseUrl: ""
+
 externalSecret:
   create: false
   secretStoreRef: ""
