@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -402,4 +403,9 @@ func TestBuildAppStream_SystemBoardTarget(t *testing.T) {
 	t.Run("OtherTargetsUntouched", func(t *testing.T) {
 		assert.Equal(t, []string{ieTarget}, provides(t, payload("c734e171-8721-48c9-9ed6-d5bc7da5ef8d", ieTarget)))
 	})
+}
+
+func TestUnixTime(t *testing.T) {
+	assert.Equal(t, int64(0), unixTime(time.Time{}), "a package with no date gives no timestamp, not a negative one")
+	assert.Equal(t, int64(1718928000), unixTime(time.Date(2024, 6, 21, 0, 0, 0, 0, time.UTC)))
 }

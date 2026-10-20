@@ -222,6 +222,7 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 		out.Description = lvfs.Description{
 			Value: "<p>" + html.EscapeString(description) + "</p>",
 		}
+		out.DeveloperName = "Dell"
 		out.ID = fmt.Sprintf("com.%s.%s", strings.ToLower("Dell"), componentUUID(dev.ComponentID, systemIDs))
 
 		// Provides: GUIDs for this specific device across all system IDs
@@ -239,6 +240,7 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 		out.Releases = append(out.Releases, lvfs.Release{
 			Version:     fw.VendorVersion,
 			Date:        fw.DateTime.Format(time.DateOnly),
+			Timestamp:   unixTime(fw.DateTime),
 			Description: out.Description,
 			Urgency:     getUrgency(fw.Criticality.Value),
 		})
@@ -256,6 +258,14 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 	}
 
 	return components, nil
+}
+
+// unixTime is the Unix time of a date the catalog gave, or 0 when it gave none.
+func unixTime(date time.Time) int64 {
+	if date.IsZero() {
+		return 0
+	}
+	return date.Unix()
 }
 
 // supportedSystemIDs returns the sorted, de-duplicated systems an entry covers.

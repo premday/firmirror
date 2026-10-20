@@ -5,7 +5,9 @@ import "encoding/xml"
 // MetadataSchemaVersion is bumped when components are built differently, which
 // discards the stored metadata and forces a full reprocessing.
 // 2: component identity includes the systems a package applies to.
-const MetadataSchemaVersion = 2
+// 3: releases carry their timestamp and their sizes, and Dell components their
+// vendor.
+const MetadataSchemaVersion = 3
 
 type Components struct {
 	XMLName       xml.Name    `xml:"components"`
@@ -48,6 +50,7 @@ type Release struct {
 	Urgency         string      `xml:"urgency,attr,omitempty"`
 	Version         string      `xml:"version,attr"`
 	Date            string      `xml:"date,attr"`
+	Timestamp       int64       `xml:"timestamp,attr,omitempty"` // Unix time of the release, when the vendor gives more than a day
 	InstallDuration int         `xml:"install_duration,attr"`
 	Sizes           []Size      `xml:"size,omitempty"`
 	Location        string      `xml:"location,omitempty"`
