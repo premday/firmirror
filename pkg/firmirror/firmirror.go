@@ -580,23 +580,10 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	return true, nil
 }
 
-// componentKey identifies a component by its ID and its GUIDs. One set of GUIDs
-// covers all of a component's releases, so a package covering other platforms
-// must not merge its releases in: fwupd would reject the cabinet it downloads
-// with "No supported devices found".
-func componentKey(component lvfs.Component) string {
-	guids := make([]string, 0, len(component.Provides))
-	for _, provide := range component.Provides {
-		guids = append(guids, provide.Text)
-	}
-	slices.Sort(guids)
-	return component.ID + "\n" + strings.Join(slices.Compact(guids), ",")
-}
-
 func firmwareFilenamesByComponent(components []lvfs.Component) map[string]map[string]struct{} {
 	filenames := make(map[string]map[string]struct{})
 	for _, component := range components {
-		key := componentKey(component)
+		key := lvfs.ComponentKey(component)
 		for _, release := range component.Releases {
 			for _, checksum := range release.Checksums {
 				if checksum.Filename != "" {
@@ -628,7 +615,7 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 	if existing != nil {
 		for _, existingComponent := range existing.Component {
 			component := existingComponent
-			key := componentKey(component)
+			key := lvfs.ComponentKey(component)
 			component.Releases = make([]lvfs.Release, 0, len(existingComponent.Releases))
 			for _, release := range existingComponent.Releases {
 				superseded := releaseContainsFirmware(release, newFirmwareFilenames[key])
@@ -656,7 +643,7 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 
 	for _, incomingComponent := range incoming {
 		component := incomingComponent
-		key := componentKey(component)
+		key := lvfs.ComponentKey(component)
 		if existingComponent, ok := componentMap[key]; ok {
 			existingComponent.Releases = append(existingComponent.Releases, component.Releases...)
 		} else {
