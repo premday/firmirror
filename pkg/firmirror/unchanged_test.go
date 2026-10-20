@@ -238,3 +238,27 @@ func TestSaveMetadataLeavesAnUnsignedDocumentPublishedMeanwhileEvenWhenSigning(t
 	assert.Empty(t, recorder.keys, "a run that signs must not replace another run's document with its own")
 	assert.Len(t, readSavedMetadata(t, dir).Component, 2)
 }
+
+func TestSaveMetadataSignsIntoAFreshJCAT(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	syncer := newBaseURLSyncer(t, dir, "")
+	// What an earlier run that was killed while signing left in the cache.
+	leftover := filepath.Join(syncer.Config.CacheDir, "metadata.xml.zst.jcat")
+	require.NoError(t, os.WriteFile(leftover, []byte("stale"), 0o644))
+	syncer.newComponents = []lvfs.Component{baseURLTestComponent()}
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	jcat, err := syncer.readStoredJCAT(ctx)
+	require.NoError(t, err)
+	assert.False(t, jcat.hasChecksum("stale"), "a checksum from a leftover JCAT would make clients reject the metadata")
+	assert.True(t, jcat.hasChecksum(fileChecksumOfStored(t, dir)))
+}
+
+func fileChecksumOfStored(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "metadata.xml.zst"))
+	require.NoError(t, err)
+	return fileChecksum(data)
+}
