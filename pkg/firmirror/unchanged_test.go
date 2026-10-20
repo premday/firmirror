@@ -162,3 +162,79 @@ func TestSaveMetadataSignsAnUnchangedDocumentWhenSigningIsTurnedOn(t *testing.T)
 	require.NoError(t, syncer.SaveMetadata(ctx))
 	assert.Empty(t, recorder.keys, "a signed JCAT is not replaced by a run that does not sign")
 }
+
+func TestSaveMetadataLeavesAlonePublishedMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := newBaseURLSyncer(t, dir, "")
+	first.newComponents = []lvfs.Component{baseURLTestComponent()}
+	require.NoError(t, first.SaveMetadata(ctx))
+
+	// A run that mirrors nothing loads the document and works for a while.
+	slow := newBaseURLSyncer(t, dir, "")
+	recorder := &writeRecorder{Storage: slow.Storage}
+	slow.Storage = recorder
+	require.NoError(t, slow.LoadMetadata(ctx))
+
+	// Another one publishes new firmware in the meantime.
+	other := baseURLTestComponent()
+	other.ID = "com.test.firmware2"
+	faster := newBaseURLSyncer(t, dir, "")
+	require.NoError(t, faster.LoadMetadata(ctx))
+	faster.newComponents = []lvfs.Component{other}
+	require.NoError(t, faster.SaveMetadata(ctx))
+
+	require.NoError(t, slow.SaveMetadata(ctx))
+	assert.Empty(t, recorder.keys, "a run with nothing to publish must not replace what another run published")
+	assert.Len(t, readSavedMetadata(t, dir).Component, 2)
+}
+
+// publishedMeanwhile loads a run that mirrors nothing, then has another run
+// publish firmware2.cab, and returns the first, to be saved.
+func publishedMeanwhile(t *testing.T, dir string, configure func(*FirmirrorSyncer)) *FirmirrorSyncer {
+	t.Helper()
+	ctx := context.Background()
+	first := newBaseURLSyncer(t, dir, "")
+	first.newComponents = []lvfs.Component{baseURLTestComponent()}
+	require.NoError(t, first.SaveMetadata(ctx))
+
+	slow := newBaseURLSyncer(t, dir, "")
+	configure(slow)
+	require.NoError(t, slow.LoadMetadata(ctx))
+
+	other := baseURLTestComponent()
+	other.ID = "com.test.firmware2"
+	other.Releases[0].Artifacts[0].Location = "firmware2.cab"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "firmware2.cab"), []byte("cab"), 0o644))
+	faster := newBaseURLSyncer(t, dir, "")
+	require.NoError(t, faster.LoadMetadata(ctx))
+	faster.newComponents = []lvfs.Component{other}
+	require.NoError(t, faster.SaveMetadata(ctx))
+	return slow
+}
+
+func TestSaveMetadataDoesNotReclaimThePackagesOfARunPublishedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	slow := publishedMeanwhile(t, dir, func(s *FirmirrorSyncer) {
+		s.Config.CleanupUnreferencedPackages = true
+		s.Storage = &cleanupStorage{LocalStorage: s.Storage.(*LocalStorage)}
+	})
+
+	require.NoError(t, slow.SaveMetadata(context.Background()))
+	assert.FileExists(t, filepath.Join(dir, "firmware2.cab"), "the document this run built does not reference it, the stored one does")
+}
+
+func TestSaveMetadataLeavesAnUnsignedDocumentPublishedMeanwhileEvenWhenSigning(t *testing.T) {
+	dir := t.TempDir()
+	var recorder *writeRecorder
+	slow := publishedMeanwhile(t, dir, func(s *FirmirrorSyncer) {
+		s.Config.Certificate = "/secrets/signing.cert"
+		s.Config.PrivateKey = "/secrets/signing.key"
+		recorder = &writeRecorder{Storage: s.Storage}
+		s.Storage = recorder
+	})
+
+	require.NoError(t, slow.SaveMetadata(context.Background()))
+	assert.Empty(t, recorder.keys, "a run that signs must not replace another run's document with its own")
+	assert.Len(t, readSavedMetadata(t, dir).Component, 2)
+}
