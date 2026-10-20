@@ -514,22 +514,26 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
-	written, err := f.writeMetadata(ctx, document)
+	outcome, err := f.writeMetadata(ctx, document)
 	if err != nil {
 		return err
 	}
-	if written {
+	switch outcome {
+	case metadataWritten:
 		logger.Info("Metadata saved successfully",
 			"total_merged_components", len(document.Component),
 			"new_components", len(f.newComponents))
-	} else {
+	case metadataUnchanged:
 		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
+	case metadataRepublished:
+		// Reclaiming against this run's document would delete the other run's packages.
+		return nil
 	}
 
 	// The stored metadata is now the one just built, so unreferenced S3 packages
 	// can be removed. A later no-op run retries any transient cleanup failures.
 	if err := f.removeUnreferencedPackages(ctx, document); err != nil {
-		if written {
+		if outcome == metadataWritten {
 			return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
 		}
 		return fmt.Errorf("failed to remove unreferenced firmware packages: %w", err)
@@ -578,30 +582,44 @@ func (f *FirmirrorSyncer) renderMetadata(document *lvfs.Components) ([]byte, err
 	return append([]byte(xml.Header), xmlBytes...), nil
 }
 
-// writeMetadata compresses, signs and stores the document, and reports whether
-// it had to be written at all. The JCAT goes first and the metadata last, as the
-// commit point.
+// writeOutcome is what writeMetadata did.
+type writeOutcome int
+
+const (
+	metadataWritten writeOutcome = iota
+	// metadataUnchanged is a document identical to the stored one.
+	metadataUnchanged
+	// metadataRepublished is a store another run published to since this one read it.
+	metadataRepublished
+)
+
+// writeMetadata compresses, signs and stores the document, unless it is
+// unchanged or another run published since. The JCAT goes first and the metadata
+// last, as the commit point.
 //
 // A document identical to the stored one is left alone. Signing it again would
 // still change the JCAT, as a PKCS#7 signature carries its signing time, and
 // every client compares the JCAT to decide whether to download the metadata
 // again.
-func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (bool, error) {
+func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (writeOutcome, error) {
 	outBytes, err := f.renderMetadata(document)
 	if err != nil {
-		return false, err
+		return metadataWritten, err
 	}
 
 	digest := sha256.Sum256(outBytes)
 	if f.stored.known() && f.stored.document == digest {
 		// A write that stopped between the JCAT and the metadata leaves a JCAT that
 		// is not the metadata's, which clients reject, and nothing else replaces it.
-		matches, err := f.storedJCATMatches(ctx)
+		state, err := f.storedJCATState(ctx)
 		switch {
 		case err != nil:
 			slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", err)
-		case matches:
-			return false, nil
+		case state == jcatCurrent:
+			return metadataUnchanged, nil
+		case state == jcatRepublished:
+			slog.Warn("The metadata was published again while this run was working, leaving it alone")
+			return metadataRepublished, nil
 		default:
 			slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
 		}
@@ -611,19 +629,19 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	var compressedBuf bytes.Buffer
 	zstWriter, err := zstd.NewWriter(&compressedBuf)
 	if err != nil {
-		return false, fmt.Errorf("failed to create zstd writer: %w", err)
+		return metadataWritten, fmt.Errorf("failed to create zstd writer: %w", err)
 	}
 	if _, err := zstWriter.Write(outBytes); err != nil {
-		return false, fmt.Errorf("failed to compress metadata: %w", err)
+		return metadataWritten, fmt.Errorf("failed to compress metadata: %w", err)
 	}
 	if err := zstWriter.Close(); err != nil {
-		return false, fmt.Errorf("failed to finalize zstd compression: %w", err)
+		return metadataWritten, fmt.Errorf("failed to finalize zstd compression: %w", err)
 	}
 
 	// Write compressed data to temp file for signing (jcat-tool requires a file path)
 	compressedPath := filepath.Join(f.Config.CacheDir, metadataKey)
 	if err := os.WriteFile(compressedPath, compressedBuf.Bytes(), 0644); err != nil {
-		return false, fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
+		return metadataWritten, fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
 	}
 	defer os.Remove(compressedPath)
 
@@ -631,26 +649,26 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	// configured, signMetadata also adds a PKCS#7 signature.
 	signaturePath := compressedPath + ".jcat"
 	if err := f.signMetadata(ctx, signaturePath, compressedPath); err != nil {
-		return false, fmt.Errorf("creating metadata JCAT: %w", err)
+		return metadataWritten, fmt.Errorf("creating metadata JCAT: %w", err)
 	}
 	defer os.Remove(signaturePath)
 
 	// Write the JCAT file to storage first (metadata is the commit point).
 	sigData, err := os.ReadFile(signaturePath)
 	if err != nil {
-		return false, fmt.Errorf("failed to read metadata JCAT file: %w", err)
+		return metadataWritten, fmt.Errorf("failed to read metadata JCAT file: %w", err)
 	}
 	if err := f.Storage.Write(ctx, jcatKey, bytes.NewReader(sigData)); err != nil {
-		return false, fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
+		return metadataWritten, fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
 	}
 
 	// Write compressed metadata to storage (commit point — written last)
 	if err := f.Storage.Write(ctx, metadataKey, bytes.NewReader(compressedBuf.Bytes())); err != nil {
-		return false, fmt.Errorf("failed to write metadata to storage: %w", err)
+		return metadataWritten, fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
 
 	f.stored = fingerprint{document: digest, file: fileChecksum(compressedBuf.Bytes())}
-	return true, nil
+	return metadataWritten, nil
 }
 
 func firmwareFilenamesByComponent(components []lvfs.Component) map[string]map[string]struct{} {
