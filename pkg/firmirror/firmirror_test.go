@@ -433,6 +433,30 @@ func TestFirmirrorSyncer_BuildPackage(t *testing.T) {
 	})
 }
 
+func TestFirmirrorSyncer_BuildPackageSizes(t *testing.T) {
+	syncer, tmpDir := createTestSyncer(t)
+	components := []*lvfs.Component{{
+		Type:     "firmware",
+		ID:       "com.test.firmware",
+		Releases: []lvfs.Release{{Version: "1.0.0", Date: "2026-01-01"}},
+	}}
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "firmware.bin"), []byte("test firmware"), 0644))
+
+	require.NoError(t, syncer.buildPackage(context.TODO(), components, "firmware.bin", tmpDir))
+
+	cab, err := os.Stat(filepath.Join(tmpDir, "firmware.bin.cab"))
+	require.NoError(t, err)
+	assert.Equal(t, []lvfs.Size{
+		{Type: "installed", Bytes: int64(len("test firmware"))},
+		{Type: "download", Bytes: cab.Size()},
+	}, components[0].Releases[0].Sizes, "the published release carries both sizes")
+
+	metainfo, err := os.ReadFile(filepath.Join(tmpDir, "0.metainfo.xml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(metainfo), `<size type="installed">13</size>`)
+	assert.NotContains(t, string(metainfo), `type="download"`, "the cabinet cannot hold its own size")
+}
+
 func TestFirmirrorSyncer_SignMetadata(t *testing.T) {
 	t.Run("CreatesChecksumJCATWithoutSigningKeys", func(t *testing.T) {
 		syncer, tmpDir := createTestSyncer(t)

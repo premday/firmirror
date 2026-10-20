@@ -237,6 +237,11 @@ func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.C
 	fwPath := filepath.Join(tmpDir, fwFile)
 	logger := slog.With("firmware", fwFile)
 
+	payload, err := os.Stat(fwPath)
+	if err != nil {
+		return fmt.Errorf("sizing firmware: %w", err)
+	}
+
 	// Calculate firmware checksums (shared by all components)
 	sha1Hash, sha256Hash, err := calculateChecksums(fwPath)
 	if err != nil {
@@ -251,6 +256,7 @@ func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.C
 				{Filename: fwFile, Target: "content", Type: "sha1", Value: sha1Hash},
 				{Filename: fwFile, Target: "content", Type: "sha256", Value: sha256Hash},
 			}
+			component.Releases[j].Sizes = []lvfs.Size{{Type: "installed", Bytes: payload.Size()}}
 		}
 
 		metaName := fmt.Sprintf("%d.metainfo.xml", i)
@@ -298,10 +304,17 @@ func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.C
 		return fmt.Errorf("failed to calculate CAB checksums: %w", err)
 	}
 
+	cab, err := os.Stat(cabPathInCache)
+	if err != nil {
+		return fmt.Errorf("sizing CAB: %w", err)
+	}
+
 	cabName := cabSha256 + "-" + fwFile + ".cab"
-	// Add artifacts section to all components
+	// Add artifacts section to all components. The download size is only known
+	// now, so it is published but cannot be in the metainfo inside the CAB.
 	for _, component := range components {
 		for i := range component.Releases {
+			component.Releases[i].Sizes = append(component.Releases[i].Sizes, lvfs.Size{Type: "download", Bytes: cab.Size()})
 			component.Releases[i].Artifacts = []lvfs.Artifact{
 				{
 					Type:     "binary",
