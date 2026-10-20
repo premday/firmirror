@@ -26,7 +26,7 @@ This allows you to host your own firmware mirror that `fwupd` clients can consum
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - `fwupdtool` (for building CAB packages)
 - `jcat-tool` (for creating JCAT signature files)
 
@@ -157,6 +157,12 @@ next to `MetadataURI` and needs no flag. Changing the flag rewrites the stored l
 Firmirror tracks which firmware files have already been processed in the metadata index. On subsequent runs, already-existing firmware is skipped, so only new entries are downloaded and processed.
 
 To force re-processing of a firmware, delete its CAB file and remove it from the metadata.
+
+### When the metadata is published
+
+The metadata is only written when it has to be. A run that mirrors nothing leaves an identical `metadata.xml.zst` and its JCAT alone: signing again would change the JCAT, which every client compares to decide whether to download the metadata again. It is published again when the JCAT is not the metadata's, as an interrupted write leaves it (the JCAT is written first, the metadata last), or when it holds no signature while signing is configured, so turning signing on takes effect at the next refresh without waiting for new firmware. A signed JCAT is not replaced by a run without signing keys that has nothing else to publish.
+
+If another run published meanwhile, a run that mirrors nothing leaves that document alone, and removes no package either. A refresh that cannot save the metadata fails. Do not run two refreshes at once: `concurrencyPolicy: Forbid` does not stop a Job created by hand from the CronJob, and a run that mirrors new firmware still replaces what another run published. Changing the signing key does not sign an unchanged document again, as a signature is only looked for, not checked.
 
 ## Storage Backends
 
@@ -303,7 +309,9 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 ├── cmd/firmirror.go              # CLI entry point
 ├── pkg/
 │   ├── firmirror/                # Core sync logic, storage backends
-│   │   ├── firmirror.go          # FirmirrorSyncer: orchestration
+│   │   ├── firmirror.go          # FirmirrorSyncer: orchestration, publishing the metadata
+│   │   ├── jcat.go               # Reading the stored JCAT
+│   │   ├── baseurl.go            # Package locations, bare or under --firmware-base-url
 │   │   ├── vendor.go             # Vendor/Catalog/FirmwareEntry interfaces
 │   │   ├── storage.go            # Storage interface
 │   │   ├── storage_local.go      # Local filesystem storage
