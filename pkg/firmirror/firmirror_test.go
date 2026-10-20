@@ -715,7 +715,7 @@ func TestMergeComponents(t *testing.T) {
 			components, superseded := mergeComponents(existing, incoming, test.replaceSuperseded)
 
 			var rebuiltPackages []string
-			for _, release := range components[componentKey(incoming[0])].Releases {
+			for _, release := range components[lvfs.ComponentKey(incoming[0])].Releases {
 				if release.Location != "" {
 					rebuiltPackages = append(rebuiltPackages, release.Location)
 				} else {
@@ -723,7 +723,7 @@ func TestMergeComponents(t *testing.T) {
 				}
 			}
 			assert.Equal(t, test.wantRebuiltPackages, rebuiltPackages)
-			assert.Equal(t, "unrelated.cab", components[componentKey(existing.Component[1])].Releases[0].Location)
+			assert.Equal(t, "unrelated.cab", components[lvfs.ComponentKey(existing.Component[1])].Releases[0].Location)
 			assert.Equal(t, []string{"old-rebuilt.cab"}, superseded)
 		})
 	}
@@ -756,12 +756,12 @@ func TestMergeComponentsKeepsDifferentGUIDsApart(t *testing.T) {
 	require.Len(t, components, 2, "Components with the same ID but different GUIDs must not be merged")
 	assert.Empty(t, superseded, "A release for other platforms supersedes nothing")
 
-	c6615 := components[componentKey(existing.Component[0])]
+	c6615 := components[lvfs.ComponentKey(existing.Component[0])]
 	require.NotNil(t, c6615)
 	require.Len(t, c6615.Releases, 1)
 	assert.Equal(t, "7.30.30.51", c6615.Releases[0].Version, "The C6615 must keep the release its cabinet actually applies to")
 
-	r6625 := components[componentKey(sameIDOtherPlatform)]
+	r6625 := components[lvfs.ComponentKey(sameIDOtherPlatform)]
 	require.NotNil(t, r6625)
 	require.Len(t, r6625.Releases, 1)
 	assert.Equal(t, "7.30.30.54", r6625.Releases[0].Version)
@@ -784,7 +784,7 @@ func TestMergeComponentsMergesSameGUIDs(t *testing.T) {
 	components, _ := mergeComponents(existing, incoming, true)
 
 	require.Len(t, components, 1)
-	require.Len(t, components[componentKey(incoming[0])].Releases, 2)
+	require.Len(t, components[lvfs.ComponentKey(incoming[0])].Releases, 2)
 }
 
 // A metadata document can legitimately hold several components with the same key:
@@ -814,7 +814,7 @@ func TestMergeComponentsPoolsComponentsSharingAKey(t *testing.T) {
 		components, superseded := mergeComponents(existing, nil, true)
 
 		require.Len(t, components, 1, "Components sharing a key must pool into one")
-		merged := components[componentKey(existing.Component[0])]
+		merged := components[lvfs.ComponentKey(existing.Component[0])]
 		require.NotNil(t, merged)
 
 		var versions []string
@@ -831,7 +831,7 @@ func TestMergeComponentsPoolsComponentsSharingAKey(t *testing.T) {
 
 		components, superseded := mergeComponents(existing, []lvfs.Component{rebuilt}, true)
 
-		merged := components[componentKey(existing.Component[0])]
+		merged := components[lvfs.ComponentKey(existing.Component[0])]
 		require.NotNil(t, merged)
 
 		var locations []string
