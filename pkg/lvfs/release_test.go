@@ -1,9 +1,11 @@
 package lvfs
 
 import (
+	"encoding/xml"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSortReleases(t *testing.T) {
@@ -48,4 +50,23 @@ func TestReleaseChecksumFallsBackToAnotherContentChecksum(t *testing.T) {
 	}}
 
 	assert.Equal(t, "content", releaseChecksum(release))
+}
+
+func TestReleaseTimestampAndSizesAreOmittedWhenUnknown(t *testing.T) {
+	out, err := xml.Marshal(Release{Version: "1.0", Date: "2026-01-01"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "timestamp")
+	assert.NotContains(t, string(out), "<size")
+}
+
+func TestReleaseTimestampAndSizes(t *testing.T) {
+	out, err := xml.Marshal(Release{
+		Version:   "1.0",
+		Date:      "2026-01-01",
+		Timestamp: 1767225600,
+		Sizes:     []Size{{Type: "installed", Bytes: 123}, {Type: "download", Bytes: 456}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `timestamp="1767225600"`)
+	assert.Contains(t, string(out), `<size type="installed">123</size><size type="download">456</size>`)
 }

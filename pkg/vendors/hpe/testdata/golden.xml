@@ -12,7 +12,7 @@
   <metadata_license>proprietary</metadata_license>
   <project_license>proprietary</project_license>
   <releases>
-    <release version="22.41.1000" date="2024-06-21" install_duration="360">
+    <release version="22.41.1000" date="2024-06-21" timestamp="1718950107" install_duration="360">
       <description><p>Mellanox HPE signed PLDM Firmware Package for Mellanox MCX623106AS-CDAT Ethernet 100Gb 2-port QSFP56 Adapter for HPE</p></description>
       <issues></issues>
       <artifacts></artifacts>

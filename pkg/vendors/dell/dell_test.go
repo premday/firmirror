@@ -623,3 +623,8 @@ func mustParseTime(timeStr string) time.Time {
 	}
 	return t
 }
+
+func TestUnixTime(t *testing.T) {
+	assert.Equal(t, int64(0), unixTime(time.Time{}), "a catalog with no date gives no timestamp, not a negative one")
+	assert.Equal(t, int64(1593714054), unixTime(time.Date(2020, 7, 2, 18, 20, 54, 0, time.UTC)))
+}
