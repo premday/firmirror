@@ -648,10 +648,13 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	// Always create a JCAT file containing checksums. When signing keys are
 	// configured, signMetadata also adds a PKCS#7 signature.
 	signaturePath := compressedPath + ".jcat"
+	// jcat-tool adds to a JCAT that exists, so one left by a run that failed or was
+	// killed would keep its stale checksum, which makes clients reject the result.
+	os.Remove(signaturePath)
+	defer os.Remove(signaturePath)
 	if err := f.signMetadata(ctx, signaturePath, compressedPath); err != nil {
 		return metadataWritten, fmt.Errorf("creating metadata JCAT: %w", err)
 	}
-	defer os.Remove(signaturePath)
 
 	// Write the JCAT file to storage first (metadata is the commit point).
 	sigData, err := os.ReadFile(signaturePath)

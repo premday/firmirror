@@ -32,7 +32,12 @@ fi
 # file from self-sign, and a PKCS#7 blob (kind 3) added by sign.
 if [ "$1" = "self-sign" ]; then
 	sum=$(sha256sum "$3" | cut -d' ' -f1)
-	printf '{"JcatVersionMajor":0,"JcatVersionMinor":1,"Items":[{"Id":"%s","Blobs":[{"Kind":1,"Flags":1,"Data":"%s"}]}]}' "$3" "$sum" | gzip -c > "$2"
+	# Like jcat-tool, add to a JCAT that exists instead of replacing it.
+	stale=""
+	if [ -e "$2" ]; then
+		stale='{"Id":"stale","Blobs":[{"Kind":1,"Flags":1,"Data":"stale"}]},'
+	fi
+	printf '{"JcatVersionMajor":0,"JcatVersionMinor":1,"Items":[%s{"Id":"%s","Blobs":[{"Kind":1,"Flags":1,"Data":"%s"}]}]}' "$stale" "$3" "$sum" | gzip -c > "$2"
 fi
 if [ "$1" = "sign" ]; then
 	sum=$(sha256sum "$3" | cut -d' ' -f1)
