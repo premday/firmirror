@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 )
 
 // jcatKindSHA256 is libjcat's JcatBlobKind for a SHA-256 checksum.
 const jcatKindSHA256 = 1
+
+// jcatSignatureKinds are libjcat's blob kinds for GPG, PKCS#7 and ED25519
+// signatures.
+var jcatSignatureKinds = []int{2, 3, 9}
 
 // storedJCAT is the part of a JCAT firmirror reads. libjcat writes gzipped JSON:
 // one item per file, holding blobs of a kind (checksum, signature) and their
@@ -62,17 +67,26 @@ func (j *storedJCAT) hasBlob(match func(kind int, data string) bool) bool {
 	return false
 }
 
+// isSigned reports whether the JCAT holds a signature, not only checksums.
+func (j *storedJCAT) isSigned() bool {
+	return j.hasBlob(func(kind int, _ string) bool { return slices.Contains(jcatSignatureKinds, kind) })
+}
+
 // hasChecksum reports whether the JCAT holds this SHA-256 digest.
 func (j *storedJCAT) hasChecksum(digest string) bool {
 	return j.hasBlob(func(kind int, data string) bool { return kind == jcatKindSHA256 && data == digest })
 }
 
 // storedJCATMatches reports whether the stored JCAT carries the checksum of the
-// stored metadata. A missing JCAT does not.
+// stored metadata, and a signature when signing is configured. A missing JCAT
+// does not.
 func (f *FirmirrorSyncer) storedJCATMatches(ctx context.Context) (bool, error) {
 	jcat, err := f.readStoredJCAT(ctx)
 	if err != nil || jcat == nil {
 		return false, err
+	}
+	if f.signing() && !jcat.isSigned() {
+		return false, nil
 	}
 	return jcat.hasChecksum(f.stored.file), nil
 }
