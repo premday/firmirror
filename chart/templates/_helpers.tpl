@@ -67,8 +67,8 @@ Get the image tag
 {{- end }}
 
 {{/*
-The arguments that depend on the environment: where the metadata is stored and
-how it is signed.
+The arguments that depend on the environment: where the metadata is stored, how
+it is signed and where it is served from.
 */}}
 {{- define "firmirror.commonArgs" -}}
 {{- if .Values.storage.s3.enabled }}
@@ -94,6 +94,9 @@ how it is signed.
 {{- if .Values.signing.enabled }}
 - --sign.certificate=/secrets/signing.cert
 - --sign.private-key=/secrets/signing.key
+{{- end }}
+{{- if .Values.firmwareBaseUrl }}
+- {{ printf "--firmware-base-url=%s" .Values.firmwareBaseUrl | quote }}
 {{- end }}
 {{- end }}
 

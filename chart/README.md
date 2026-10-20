@@ -54,6 +54,7 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `storage.s3.region` | AWS region | `""` |
 | `storage.s3.endpoint` | Custom S3 endpoint (for MinIO, etc.) | `""` |
 | `storage.s3.secretName` | Secret containing AWS credentials | `""` |
+| `firmwareBaseUrl` | Public URL the output is served from (the remote's `FirmwareBaseURI`); packages are then named by absolute URL in the metadata | `""` (bare file names) |
 | `externalSecret.create` | Create an ExternalSecret resource | `false` |
 | `externalSecret.secretStoreRef` | Reference to the SecretStore | `""` |
 | `externalSecret.targetSecret` | Name of the secret to create | `""` |
