@@ -415,7 +415,7 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	} else {
 		// Locations go back to the name the package is stored under, whatever
 		// base URL an earlier run published them with.
-		f.existingMetadata, _ = rewriteLocations(&components, bareLocation)
+		f.existingMetadata = rewriteLocations(&components, bareLocation)
 
 		// Build index of existing firmware files from checksums
 		for _, comp := range components.Component {
@@ -517,7 +517,7 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (bool, error) {
 	// Marshal metadata to XML
 	outBytes := []byte(xml.Header)
-	published, _ := rewriteLocations(document, f.publishedLocation)
+	published := rewriteLocations(document, f.publishedLocation)
 	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal metadata XML: %w", err)

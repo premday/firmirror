@@ -49,31 +49,22 @@ func (f *FirmirrorSyncer) publishedLocation(location string) string {
 }
 
 // rewriteLocations returns a copy of components with every location passed
-// through fn, and whether any of them changed. The input is left untouched.
-func rewriteLocations(components *lvfs.Components, fn func(string) string) (*lvfs.Components, bool) {
-	changed := false
-	apply := func(location string) string {
-		out := fn(location)
-		if out != location {
-			changed = true
-		}
-		return out
-	}
-
+// through fn. The input is left untouched.
+func rewriteLocations(components *lvfs.Components, fn func(string) string) *lvfs.Components {
 	out := *components
 	out.Component = make([]lvfs.Component, len(components.Component))
 	for i, component := range components.Component {
 		component.Releases = make([]lvfs.Release, len(component.Releases))
 		for j, release := range components.Component[i].Releases {
-			release.Location = apply(release.Location)
+			release.Location = fn(release.Location)
 			release.Artifacts = make([]lvfs.Artifact, len(release.Artifacts))
 			for k, artifact := range components.Component[i].Releases[j].Artifacts {
-				artifact.Location = apply(artifact.Location)
+				artifact.Location = fn(artifact.Location)
 				release.Artifacts[k] = artifact
 			}
 			component.Releases[j] = release
 		}
 		out.Component[i] = component
 	}
-	return &out, changed
+	return &out
 }
