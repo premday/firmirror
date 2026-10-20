@@ -2,20 +2,16 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/alecthomas/kong"
 
 	"github.com/premday/firmirror/pkg/firmirror"
-	"github.com/premday/firmirror/pkg/vendors/dell"
-	"github.com/premday/firmirror/pkg/vendors/hpe"
 )
 
 type DellFlags struct {
@@ -58,140 +54,77 @@ var args struct {
 
 func main() {
 	cli := kong.Parse(&args)
-	switch cli.Command() {
-	case "refresh":
-	default:
-		panic(cli.Command())
-	}
 
-	if err := run(); err != nil {
+	if err := run(cli.Command()); err != nil {
 		slog.Error("firmirror exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() (runErr error) {
-	// Check if bin tools are available
-	for _, bin := range []string{"fwupdtool", "jcat-tool"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			return fmt.Errorf("%s is required but not found in PATH", bin)
-		}
-	}
-
+func run(command string) error {
 	// Monitor for shutdown signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer stop()
 
+	switch command {
+	case "refresh":
+		return runRefresh(ctx, stop)
+	default:
+		panic(command)
+	}
+}
+
+// requireTools checks for the external tools a command actually uses, so a
+// command that builds or signs nothing runs on a machine without them.
+func requireTools(tools ...string) error {
+	for _, tool := range tools {
+		if _, err := exec.LookPath(tool); err != nil {
+			return fmt.Errorf("%s is required but not found in PATH", tool)
+		}
+	}
+	return nil
+}
+
+// checkSigningKeys accepts a certificate and a key together, or neither.
+func checkSigningKeys() error {
 	certProvided := args.Signature.Certificate != ""
 	keyProvided := args.Signature.PrivateKey != ""
-	if certProvided && keyProvided {
+
+	switch {
+	case certProvided && keyProvided:
 		if _, err := os.Stat(args.Signature.Certificate); err != nil {
 			return fmt.Errorf("certificate file not accessible: %s: %w", args.Signature.Certificate, err)
 		}
 		if _, err := os.Stat(args.Signature.PrivateKey); err != nil {
 			return fmt.Errorf("private key file not accessible: %s: %w", args.Signature.PrivateKey, err)
 		}
-	} else if certProvided || keyProvided {
+	case certProvided || keyProvided:
 		return fmt.Errorf("both --sign.certificate and --sign.private-key must be provided together, or neither")
-	} else {
+	default:
 		slog.Warn("No certificate or private key provided, metadata will not be signed")
 	}
 
-	var storage firmirror.Storage
-	var err error
+	return nil
+}
 
+// openStorage builds the storage backend the flags describe.
+func openStorage(ctx context.Context) (firmirror.Storage, error) {
 	if args.S3.Enable {
-		storage, err = firmirror.NewS3Storage(ctx, args.S3.Bucket, args.S3.Prefix, args.S3.Region, args.S3.Endpoint)
+		storage, err := firmirror.NewS3Storage(ctx, args.S3.Bucket, args.S3.Prefix, args.S3.Region, args.S3.Endpoint)
 		if err != nil {
-			return fmt.Errorf("failed to create S3 storage backend: %w", err)
+			return nil, fmt.Errorf("failed to create S3 storage backend: %w", err)
 		}
 		slog.Info("Using S3 storage backend", "bucket", args.S3.Bucket, "prefix", args.S3.Prefix)
-	} else {
-		if args.OutputDir == "" {
-			return fmt.Errorf("output directory is required when using local storage")
-		}
-
-		storage, err = firmirror.NewLocalStorage(args.OutputDir)
-		if err != nil {
-			return fmt.Errorf("failed to create local storage backend: %w", err)
-		}
-		slog.Info("Using local filesystem storage", "path", args.OutputDir)
+		return storage, nil
 	}
 
-	if args.Concurrency < 1 {
-		return fmt.Errorf("concurrency must be at least 1, got %d", args.Concurrency)
+	if args.OutputDir == "" {
+		return nil, fmt.Errorf("output directory is required when using local storage")
 	}
-
-	if !args.HPEFlags.Enable && !args.DellFlags.Enable {
-		return fmt.Errorf("no vendor enabled")
-	}
-
-	config := firmirror.FirmirrorConfig{
-		CacheDir:                    ".firmirror_cache",
-		Certificate:                 args.Signature.Certificate,
-		PrivateKey:                  args.Signature.PrivateKey,
-		MaxConcurrency:              args.Concurrency,
-		CleanupUnreferencedPackages: args.S3.Cleanup,
-		FirmwareBaseURL:             args.FirmwareBaseURL,
-	}
-
-	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
+	storage, err := firmirror.NewLocalStorage(args.OutputDir)
 	if err != nil {
-		return fmt.Errorf("failed to create syncer: %w", err)
+		return nil, fmt.Errorf("failed to create local storage backend: %w", err)
 	}
-
-	if args.HPEFlags.Enable {
-		for _, gen := range args.HPEFlags.Gens {
-			hpeRepo := "fwpp-" + gen
-			hpeVendor := hpe.NewHPEVendor(hpeRepo, args.HPEFlags.BaseURL)
-			fm.RegisterVendor("hpe-"+gen, hpeVendor)
-		}
-	}
-
-	if args.DellFlags.Enable {
-		dellVendor := dell.NewDellVendor(args.DellFlags.MachinesID, args.DellFlags.BaseURL)
-		fm.RegisterVendor("dell", dellVendor)
-	}
-
-	defer func() {
-		stop()
-		slog.Info("Saving repository metadata")
-		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
-			slog.Error("Failed to save metadata", "error", saveErr)
-			if args.S3.Cleanup {
-				runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
-			}
-		}
-	}()
-
-	// Load existing metadata to avoid reprocessing
-	if err := fm.LoadMetadata(ctx); err != nil {
-		return fmt.Errorf("failed to load existing metadata: %w", err)
-	}
-
-	slog.Info("Starting firmware processing", "vendors", len(fm.GetAllVendors()))
-	startTime := time.Now()
-
-	var hasError bool
-	for vendorName, vendor := range fm.GetAllVendors() {
-		if ctx.Err() != nil {
-			break
-		}
-
-		slog.Info("Processing vendor", "name", vendorName)
-		if err := fm.ProcessVendor(ctx, vendor, vendorName); err != nil && err != context.Canceled {
-			slog.Error("Failed to process vendor", "vendor", vendorName, "error", err)
-			hasError = true
-		}
-	}
-
-	slog.Info("Firmware processing completed",
-		"duration", time.Since(startTime).Round(time.Second),
-		"new_components", fm.GetNewComponentCount(),
-		"vendors_processed", len(fm.GetAllVendors()))
-
-	if hasError {
-		return fmt.Errorf("one or more vendors failed to process")
-	}
-	return nil
+	slog.Info("Using local filesystem storage", "path", args.OutputDir)
+	return storage, nil
 }
