@@ -64,9 +64,7 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		slog.Info("Saving repository metadata")
 		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
 			slog.Error("Failed to save metadata", "error", saveErr)
-			if args.S3.Cleanup {
-				runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
-			}
+			runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
 		}
 	}()
 
