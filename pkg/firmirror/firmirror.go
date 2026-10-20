@@ -41,7 +41,9 @@ type FirmirrorSyncer struct {
 	existingMetadata *lvfs.Components // Loaded metadata from existing metadata.xml.gz
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
 	newComponents    []lvfs.Component // Components accumulated during this run
-	locationsStale   bool             // Loaded metadata locations differ from what the current FirmwareBaseURL publishes
+
+	storedDocument  [sha256.Size]byte // Digest of the document read from storage
+	hasStoredDigest bool
 }
 
 func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSyncer, error) {
@@ -382,6 +384,8 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to read metadata file: %w", err)
 	}
+	f.storedDocument = sha256.Sum256(data)
+	f.hasStoredDigest = true
 
 	var components lvfs.Components
 	if err := xml.Unmarshal(data, &components); err != nil {
@@ -398,9 +402,6 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	} else {
 		// Locations go back to the name the package is stored under, whatever
 		// base URL an earlier run published them with.
-		_, f.locationsStale = rewriteLocations(&components, func(location string) string {
-			return f.publishedLocation(bareLocation(location))
-		})
 		f.existingMetadata, _ = rewriteLocations(&components, bareLocation)
 
 		// Build index of existing firmware files from checksums
@@ -428,13 +429,11 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	logger := slog.With("component", "metadata-save")
 
-	if len(f.newComponents) == 0 && !f.locationsStale {
-		if !f.Config.CleanupUnreferencedPackages {
-			logger.Info("No new component, skipping metadata update")
-			return nil
-		}
-		logger.Info("No new component, skipping metadata update and checking for stale packages")
-		return f.removeUnreferencedPackages(ctx, f.existingMetadata)
+	// A run that mirrored nothing and holds no current document has nothing to
+	// publish, and must not replace whatever is stored with an empty one.
+	if f.existingMetadata == nil && len(f.newComponents) == 0 {
+		logger.Info("No new component and no current metadata, skipping metadata update")
+		return nil
 	}
 
 	document, supersededLocations := f.buildDocument(f.Config.CleanupUnreferencedPackages)
@@ -442,19 +441,23 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
-	if err := f.writeMetadata(ctx, document); err != nil {
+	written, err := f.writeMetadata(ctx, document)
+	if err != nil {
 		return err
 	}
+	if written {
+		logger.Info("Metadata saved successfully",
+			"total_merged_components", len(document.Component),
+			"new_components", len(f.newComponents))
+	} else {
+		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
+	}
 
-	// The new metadata is now committed, so unreferenced S3 packages can be
-	// removed. A later no-op run retries any transient cleanup failures.
+	// The stored metadata is now the one just built, so unreferenced S3 packages
+	// can be removed. A later no-op run retries any transient cleanup failures.
 	if err := f.removeUnreferencedPackages(ctx, document); err != nil {
 		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
 	}
-
-	logger.Info("Metadata saved successfully",
-		"total_merged_components", len(document.Component),
-		"new_components", len(f.newComponents))
 
 	return nil
 }
@@ -490,35 +493,45 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 	return document, supersededLocations
 }
 
-// writeMetadata compresses, signs and stores the document. The JCAT goes first
-// and the metadata last, as the commit point.
-func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) error {
+// writeMetadata compresses, signs and stores the document, and reports whether
+// it had to be written at all. The JCAT goes first and the metadata last, as the
+// commit point.
+//
+// A document identical to the stored one is left alone. Signing it again would
+// still change the JCAT, as a PKCS#7 signature carries its signing time, and
+// every client compares the JCAT to decide whether to download the metadata
+// again.
+func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (bool, error) {
 	// Marshal metadata to XML
 	outBytes := []byte(xml.Header)
 	published, _ := rewriteLocations(document, f.publishedLocation)
 	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata XML: %w", err)
+		return false, fmt.Errorf("failed to marshal metadata XML: %w", err)
 	}
 	outBytes = append(outBytes, xmlBytes...)
+
+	if f.hasStoredDigest && f.storedDocument == sha256.Sum256(outBytes) {
+		return false, nil
+	}
 
 	// Compress metadata in-memory (avoids disk round-trip)
 	var compressedBuf bytes.Buffer
 	zstWriter, err := zstd.NewWriter(&compressedBuf)
 	if err != nil {
-		return fmt.Errorf("failed to create zstd writer: %w", err)
+		return false, fmt.Errorf("failed to create zstd writer: %w", err)
 	}
 	if _, err := zstWriter.Write(outBytes); err != nil {
-		return fmt.Errorf("failed to compress metadata: %w", err)
+		return false, fmt.Errorf("failed to compress metadata: %w", err)
 	}
 	if err := zstWriter.Close(); err != nil {
-		return fmt.Errorf("failed to finalize zstd compression: %w", err)
+		return false, fmt.Errorf("failed to finalize zstd compression: %w", err)
 	}
 
 	// Write compressed data to temp file for signing (jcat-tool requires a file path)
 	compressedPath := filepath.Join(f.Config.CacheDir, "metadata.xml.zst")
 	if err := os.WriteFile(compressedPath, compressedBuf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
+		return false, fmt.Errorf("failed to write compressed metadata to temp file: %w", err)
 	}
 	defer os.Remove(compressedPath)
 
@@ -526,30 +539,32 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	// configured, signMetadata also adds a PKCS#7 signature.
 	signaturePath := compressedPath + ".jcat"
 	if err := f.signMetadata(ctx, signaturePath, compressedPath); err != nil {
-		return fmt.Errorf("creating metadata JCAT: %w", err)
+		return false, fmt.Errorf("creating metadata JCAT: %w", err)
 	}
 	defer os.Remove(signaturePath)
 
 	// Write the JCAT file to storage first (metadata is the commit point).
 	sigFile, err := os.Open(signaturePath)
 	if err != nil {
-		return fmt.Errorf("failed to open metadata JCAT file: %w", err)
+		return false, fmt.Errorf("failed to open metadata JCAT file: %w", err)
 	}
 	sigData, err := io.ReadAll(sigFile)
 	sigFile.Close()
 	if err != nil {
-		return fmt.Errorf("failed to read metadata JCAT file: %w", err)
+		return false, fmt.Errorf("failed to read metadata JCAT file: %w", err)
 	}
 	if err := f.Storage.Write(ctx, filepath.Base(signaturePath), bytes.NewReader(sigData)); err != nil {
-		return fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
+		return false, fmt.Errorf("failed to write metadata JCAT to storage: %w", err)
 	}
 
 	// Write compressed metadata to storage (commit point — written last)
 	if err := f.Storage.Write(ctx, "metadata.xml.zst", bytes.NewReader(compressedBuf.Bytes())); err != nil {
-		return fmt.Errorf("failed to write metadata to storage: %w", err)
+		return false, fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
 
-	return nil
+	f.storedDocument = sha256.Sum256(outBytes)
+	f.hasStoredDigest = true
+	return true, nil
 }
 
 // componentKey identifies a component by its ID and its GUIDs. One set of GUIDs
