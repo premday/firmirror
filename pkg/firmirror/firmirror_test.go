@@ -29,10 +29,14 @@ if [ -n "$JCAT_TOOL_LOG" ]; then
 	printf '%s\n' "$*" >> "$JCAT_TOOL_LOG"
 fi
 # Write a JCAT as jcat-tool does: gzipped JSON with a SHA-256 blob (kind 1) of the
-# file.
+# file from self-sign, and a PKCS#7 blob (kind 3) added by sign.
 if [ "$1" = "self-sign" ]; then
 	sum=$(sha256sum "$3" | cut -d' ' -f1)
 	printf '{"JcatVersionMajor":0,"JcatVersionMinor":1,"Items":[{"Id":"%s","Blobs":[{"Kind":1,"Flags":1,"Data":"%s"}]}]}' "$3" "$sum" | gzip -c > "$2"
+fi
+if [ "$1" = "sign" ]; then
+	sum=$(sha256sum "$3" | cut -d' ' -f1)
+	printf '{"JcatVersionMajor":0,"JcatVersionMinor":1,"Items":[{"Id":"%s","Blobs":[{"Kind":1,"Flags":1,"Data":"%s"},{"Kind":3,"Flags":1,"Data":"x"}]}]}' "$3" "$sum" | gzip -c > "$2"
 fi
 `
 	if err := os.WriteFile(jcatTool, []byte(script), 0755); err != nil {

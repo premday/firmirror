@@ -779,6 +779,11 @@ func (f *FirmirrorSyncer) removeUnreferencedPackages(ctx context.Context, compon
 	return errors.Join(deleteErrors...)
 }
 
+// signing reports whether the metadata is signed, and not only checksummed.
+func (f *FirmirrorSyncer) signing() bool {
+	return f.Config.Certificate != "" && f.Config.PrivateKey != ""
+}
+
 // signMetadata creates a JCAT file for the given file using jcat-tool.
 // The JCAT file contains a SHA256 checksum and a signature if signing keys are provided.
 func (f *FirmirrorSyncer) signMetadata(ctx context.Context, sigPath, filePath string) error {
@@ -803,7 +808,7 @@ func (f *FirmirrorSyncer) signMetadata(ctx context.Context, sigPath, filePath st
 		return fmt.Errorf("failed to create JCAT file with checksums: %w", err)
 	}
 
-	if f.Config.Certificate != "" && f.Config.PrivateKey != "" {
+	if f.signing() {
 		// Add a signature to the JCAT file using the certificate and private key.
 		// with GPG:
 		//   gpg --detach-sign --sign --armor firmware.xml.zst

@@ -129,3 +129,36 @@ func TestSaveMetadataWritesTheJCATWhenItIsMissing(t *testing.T) {
 
 	assert.Contains(t, recorder.keys, "metadata.xml.zst.jcat")
 }
+
+func TestSaveMetadataSignsAnUnchangedDocumentWhenSigningIsTurnedOn(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := newBaseURLSyncer(t, dir, "")
+	first.newComponents = []lvfs.Component{baseURLTestComponent()}
+	require.NoError(t, first.SaveMetadata(ctx))
+
+	reload := func(signed bool) (*FirmirrorSyncer, *writeRecorder) {
+		syncer := newBaseURLSyncer(t, dir, "")
+		if signed {
+			syncer.Config.Certificate = "/secrets/signing.cert"
+			syncer.Config.PrivateKey = "/secrets/signing.key"
+		}
+		recorder := &writeRecorder{Storage: syncer.Storage}
+		syncer.Storage = recorder
+		require.NoError(t, syncer.LoadMetadata(ctx))
+		return syncer, recorder
+	}
+
+	syncer, recorder := reload(true)
+	require.NoError(t, syncer.SaveMetadata(ctx))
+	assert.ElementsMatch(t, []string{"metadata.xml.zst.jcat", "metadata.xml.zst"}, recorder.keys,
+		"a checksum-only JCAT must be replaced by a signed one once signing is configured")
+
+	syncer, recorder = reload(true)
+	require.NoError(t, syncer.SaveMetadata(ctx))
+	assert.Empty(t, recorder.keys, "and once it is signed, the document is left alone again")
+
+	syncer, recorder = reload(false)
+	require.NoError(t, syncer.SaveMetadata(ctx))
+	assert.Empty(t, recorder.keys, "a signed JCAT is not replaced by a run that does not sign")
+}
