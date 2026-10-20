@@ -287,6 +287,7 @@ func buildAppStream(fw HPEPayload, catalogEntry *HPECatalogEntry) (*lvfs.Compone
 	out.Releases = append(out.Releases, lvfs.Release{
 		Version:         fw.Devices.Device[0].Version,
 		Date:            releaseDate.Format(time.DateOnly),
+		Timestamp:       unixTime(releaseDate),
 		InstallDuration: fw.Devices.Device[0].FirmwareImages[0].InstallDurationSec,
 		Description:     out.Description,
 	})
@@ -349,4 +350,13 @@ func readFileFromZip(zipFile, filename string) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("file not found in zip: %s", filename)
+}
+
+// unixTime is the Unix time of a release date, or 0 when the package and the
+// catalog gave none. A date with no zone is UTC.
+func unixTime(date time.Time) int64 {
+	if date.IsZero() {
+		return 0
+	}
+	return date.Unix()
 }

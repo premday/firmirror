@@ -3,6 +3,7 @@
   <id>com.dell.bc6117e0-e464-5710-9f0a-802ddb5441ae</id>
   <name>Mellanox ConnectX-6 Dx Dual Port 100GbE QSFP56 PCIe Adapter</name>
   <summary>Mellanox ConnectX-6 DX Ethernet Adapter Firmware</summary>
+  <developer_name>Dell</developer_name>
   <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
   <provides>
     <firmware type="flashed">05370b1a-1dcb-53e2-b31c-b7515f0419cb</firmware>
@@ -28,7 +29,7 @@
   <metadata_license>proprietary</metadata_license>
   <project_license>proprietary</project_license>
   <releases>
-    <release urgency="medium" version="22.27.61.06" date="2020-07-02" install_duration="0">
+    <release urgency="medium" version="22.27.61.06" date="2020-07-02" timestamp="1593714054" install_duration="0">
       <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
       <issues></issues>
       <artifacts></artifacts>
@@ -51,6 +52,7 @@
   <id>com.dell.55532282-cbfb-5994-b3ce-78c53000bcf6</id>
   <name>Mellanox ConnectX-6 Family of Server Adapters Firmware</name>
   <summary>Mellanox ConnectX-6 DX Ethernet Adapter Firmware</summary>
+  <developer_name>Dell</developer_name>
   <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
   <provides>
     <firmware type="flashed">ab466e63-2b66-5386-8c5a-2cfcc32f90e1</firmware>
@@ -76,7 +78,7 @@
   <metadata_license>proprietary</metadata_license>
   <project_license>proprietary</project_license>
   <releases>
-    <release urgency="medium" version="22.27.61.06" date="2020-07-02" install_duration="0">
+    <release urgency="medium" version="22.27.61.06" date="2020-07-02" timestamp="1593714054" install_duration="0">
       <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
       <issues></issues>
       <artifacts></artifacts>

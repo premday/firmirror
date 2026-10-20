@@ -3,6 +3,7 @@
   <id>com.dell.2c409ae1-63ff-5757-8c59-a255c6522923</id>
   <name>PowerEdge BIOS</name>
   <summary>Dell Server PowerEdge C6615 BIOS Version 1.12.2</summary>
+  <developer_name>Dell</developer_name>
   <description><p>For more information about specific items added and resolved in this BIOS version, see the Fixes and New and enhanced features sections</p></description>
   <provides>
     <firmware type="flashed">54f32232-ba7b-53c9-a930-ce4fa8f6ea18</firmware>
@@ -11,7 +12,7 @@
   <metadata_license>proprietary</metadata_license>
   <project_license>proprietary</project_license>
   <releases>
-    <release urgency="medium" version="1.12.2" date="2026-04-10" install_duration="0">
+    <release urgency="medium" version="1.12.2" date="2026-04-10" timestamp="1775803566" install_duration="0">
       <description><p>For more information about specific items added and resolved in this BIOS version, see the Fixes and New and enhanced features sections</p></description>
       <issues></issues>
       <artifacts></artifacts>
