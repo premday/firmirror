@@ -529,7 +529,10 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	// The stored metadata is now the one just built, so unreferenced S3 packages
 	// can be removed. A later no-op run retries any transient cleanup failures.
 	if err := f.removeUnreferencedPackages(ctx, document); err != nil {
-		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
+		if written {
+			return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
+		}
+		return fmt.Errorf("failed to remove unreferenced firmware packages: %w", err)
 	}
 
 	return nil
