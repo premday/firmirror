@@ -437,17 +437,35 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		return f.removeUnreferencedPackages(ctx, f.existingMetadata)
 	}
 
-	componentMap, supersededLocations := mergeComponents(
-		f.existingMetadata,
-		f.newComponents,
-		f.Config.CleanupUnreferencedPackages,
-	)
+	document, supersededLocations := f.buildDocument(f.Config.CleanupUnreferencedPackages)
 	if !f.Config.CleanupUnreferencedPackages {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
+	if err := f.writeMetadata(ctx, document); err != nil {
+		return err
+	}
+
+	// The new metadata is now committed, so unreferenced S3 packages can be
+	// removed. A later no-op run retries any transient cleanup failures.
+	if err := f.removeUnreferencedPackages(ctx, document); err != nil {
+		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
+	}
+
+	logger.Info("Metadata saved successfully",
+		"total_merged_components", len(document.Component),
+		"new_components", len(f.newComponents))
+
+	return nil
+}
+
+// buildDocument merges what is stored with what this run mirrored and returns the
+// document to publish, sorted by component for a deterministic output.
+func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string) {
+	componentMap, supersededLocations := mergeComponents(f.existingMetadata, f.newComponents, replaceSuperseded)
+
 	// Build final components structure (sorted by ID for deterministic output)
-	components := &lvfs.Components{
+	document := &lvfs.Components{
 		Origin:        "firmirror",
 		SchemaVersion: lvfs.MetadataSchemaVersion,
 	}
@@ -466,12 +484,18 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		// finish in, so without this the document differs between two runs that
 		// mirrored the same firmware.
 		lvfs.SortReleases(component.Releases)
-		components.Component = append(components.Component, *component)
+		document.Component = append(document.Component, *component)
 	}
 
+	return document, supersededLocations
+}
+
+// writeMetadata compresses, signs and stores the document. The JCAT goes first
+// and the metadata last, as the commit point.
+func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) error {
 	// Marshal metadata to XML
 	outBytes := []byte(xml.Header)
-	published, _ := rewriteLocations(components, f.publishedLocation)
+	published, _ := rewriteLocations(document, f.publishedLocation)
 	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata XML: %w", err)
@@ -524,16 +548,6 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	if err := f.Storage.Write(ctx, "metadata.xml.zst", bytes.NewReader(compressedBuf.Bytes())); err != nil {
 		return fmt.Errorf("failed to write metadata to storage: %w", err)
 	}
-
-	// The new metadata is now committed, so unreferenced S3 packages can be
-	// removed. A later no-op run retries any transient cleanup failures.
-	if err := f.removeUnreferencedPackages(ctx, components); err != nil {
-		return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
-	}
-
-	logger.Info("Metadata saved successfully",
-		"total_merged_components", len(componentMap),
-		"new_components", len(f.newComponents))
 
 	return nil
 }
