@@ -51,14 +51,40 @@ storage:
     # secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY keys
     secretName: ""
 
+# Rollout rings, published as fwupd BKC tags. What each ring serves is a YAML file
+# edited by `firmirror bkc promote` and read by the refresh. Hosts join a ring
+# with HostBkc=<tag prefix>-<ring> in fwupd.conf and run `fwupdmgr sync`.
+bkc:
+  # Where the refresh reads the file from, an HTTP(S) URL. Empty publishes no ring
+  # tag. A refresh fails, and is retried, when it cannot read the file.
+  url: ""  # e.g. https://example.com/firmirror_bkc
+  # Allow a plain HTTP URL, whose content can be altered on the way. For a trusted
+  # network only.
+  allowHttp: false
+  regen:
+    # Extra arguments of the regen-metadata Job, such as --force to drop the ring
+    # tags from the stored metadata on purpose, --drop-base-url or --stop-signing.
+    extraArgs: []
+    # How long a finished regen-metadata Job is kept, as its logs record what was
+    # published. 0 deletes it as soon as it finishes (for the refresh, 0 sets no TTL).
+    ttlSecondsAfterFinished: 604800  # 7 days
+    # How many finished Jobs the CronJob keeps, successful and failed each. It
+    # removes older ones, including those started by hand, whatever their TTL.
+    historyLimit: 10
+
 signing:
   enabled: false
   secretName: ""
   certKey: ""
   pkeyKey: ""
 
+# Extra arguments of the refresh, such as --force to publish with no ring tag over
+# metadata that has some, --drop-base-url or --stop-signing.
+extraArgs: []
+
 # Public URL the output is served from, as the fwupd remote's FirmwareBaseURI.
-# The metadata then names packages by absolute URL, not bare file name.
+# The metadata then names packages by absolute URL, not bare file name. Used by
+# the refresh and the regen-metadata Job.
 # Example: "https://mirror.example.com/fwupd/"
 firmwareBaseUrl: ""
 

@@ -1,0 +1,33 @@
+{{- /*
+A suspended CronJob, started by hand to publish the metadata again when nothing
+was mirrored, such as after the rollout rings or the signing key changed:
+
+  kubectl create job --from=cronjob/<name> <job name>
+
+It is not retried, and its Jobs are kept longer than the refresh's as their logs
+record what was published. It runs in the refresh's environment.
+*/ -}}
+{{- if include "firmirror.regenEnabled" . }}
+{{- $regen := (.Values.bkc | default dict).regen | default dict }}
+{{- $history := ternary 10 ($regen.historyLimit | default 0 | int64) (kindIs "invalid" $regen.historyLimit) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "firmirror.regenName" . }}
+  labels:
+    {{- include "firmirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: regen
+spec:
+  suspend: true
+  schedule: "0 0 1 1 *"
+  successfulJobsHistoryLimit: {{ $history }}
+  failedJobsHistoryLimit: {{ $history }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "firmirror.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: regen
+    spec:
+      {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.regenArgs" .) "backoffLimit" 0 "restartPolicy" "Never" "ttl" $regen.ttlSecondsAfterFinished "labels" (dict "app.kubernetes.io/component" "regen")) | nindent 6 }}
+{{- end }}
