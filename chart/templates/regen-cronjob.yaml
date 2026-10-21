@@ -7,7 +7,7 @@ was mirrored, such as after the rollout rings or the signing key changed:
 It is not retried, and its Jobs are kept longer than the refresh's as their logs
 record what was published. It runs in the refresh's environment.
 */ -}}
-{{- if include "firmirror.regenEnabled" . }}
+{{- if and (include "firmirror.regenEnabled" .) (not (include "firmirror.daemonEnabled" .)) }}
 {{- $regen := (.Values.bkc | default dict).regen | default dict }}
 {{- $history := ternary 10 ($regen.historyLimit | default 0 | int64) (kindIs "invalid" $regen.historyLimit) }}
 apiVersion: batch/v1

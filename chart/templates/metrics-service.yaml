@@ -1,0 +1,18 @@
+{{- $service := ((.Values.daemon | default dict).metrics | default dict).service | default dict }}
+{{- if and (include "firmirror.daemonEnabled" .) $service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "firmirror.metricsServiceName" . }}
+  labels:
+    {{- include "firmirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  selector:
+    {{- include "firmirror.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+  ports:
+  - name: metrics
+    port: {{ include "firmirror.metricsPort" . }}
+    targetPort: metrics
+{{- end }}

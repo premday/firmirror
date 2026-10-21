@@ -1,3 +1,46 @@
+# The daemon: `firmirror daemon` as a Deployment instead of the two CronJobs. It
+# refreshes at startup and publishes the metadata whether or not it changed,
+# publishes it again as soon as the rollout rings (bkc.url) change, refreshes on
+# an interval, and serves Prometheus metrics. When it is enabled, `schedule`,
+# `cronjob.*` and `bkc.regen.*` are not used, and neither CronJob exists.
+daemon:
+  enabled: false
+  # Time from the end of a refresh to the next one. The refresh at startup is the
+  # first one.
+  refreshInterval: 24h
+  # How often bkc.url is read to see whether it changed. A change publishes the
+  # metadata again, signed.
+  bkcPollInterval: 15m
+  # Time from a refresh that failed or published with errors, or a failed
+  # regeneration, to its retry. It doubles each time the run fails again, up to
+  # refreshInterval.
+  retryInterval: 15m
+  # Time after which a refresh, and a regeneration, is stopped: a hung one holds
+  # up every publish after it. A refresh stopped publishes what it mirrored. The
+  # first refresh mirrors everything, which can take hours. 0 sets none.
+  refreshTimeout: 12h
+  regenTimeout: 1h
+  # Grace period on termination: a publish that has begun is finished, and 30s
+  # is not enough to compress, sign and upload metadata.xml.zst.
+  terminationGracePeriodSeconds: 600
+  # Extra arguments of the daemon, such as --force, --drop-base-url or
+  # --stop-signing (see extraArgs, which it also gets). The metrics address is the
+  # chart's, from metrics.port, which the probes use: do not override it. They
+  # apply to every refresh and regeneration while the Deployment runs, not to one
+  # run: --force turns off the protection against a ring commit that would drop a
+  # tag until it is removed again.
+  extraArgs: []
+  metrics:
+    port: 9090
+    # A Service in front of the metrics port.
+    service:
+      enabled: false
+    # A PodMonitor, for the Prometheus Operator.
+    podMonitor:
+      enabled: false
+      interval: ""
+      labels: {}
+
 # CronJob schedule (runs daily at 2 AM by default)
 schedule: "0 2 * * *"
 
@@ -56,7 +99,8 @@ storage:
 # with HostBkc=<tag prefix>-<ring> in fwupd.conf and run `fwupdmgr sync`.
 bkc:
   # Where the refresh reads the file from, an HTTP(S) URL. Empty publishes no ring
-  # tag. A refresh fails, and is retried, when it cannot read the file.
+  # tag. A refresh fails, and is retried, when it cannot read the file; the daemon
+  # keeps the rings it has, after the first read, and says so in its log.
   url: ""  # e.g. https://example.com/firmirror_bkc
   # Allow a plain HTTP URL, whose content can be altered on the way. For a trusted
   # network only.

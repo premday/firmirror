@@ -2,9 +2,15 @@ Thank you for installing {{ .Chart.Name }}!
 
 Your release is named {{ .Release.Name }}.
 
+{{ if include "firmirror.daemonEnabled" . -}}
+Firmirror has been configured to run as a daemon with the following settings:
+
+  Refresh interval: {{ (.Values.daemon).refreshInterval | default "24h" }}
+{{- else -}}
 Firmirror has been configured to run as a CronJob with the following settings:
 
   Schedule: {{ .Values.schedule }}
+{{- end }}
 
   Enabled vendors:
   {{- if .Values.vendors.dell.enabled }}
@@ -20,13 +26,37 @@ Firmirror has been configured to run as a CronJob with the following settings:
     {{- end }}
   {{- end }}
 
-  Output directory: {{ .Values.outputDir }}
+  Output directory: {{ .Values.storage.outputDir }}
   {{- if .Values.persistence.enabled }}
   Persistent storage: {{ .Values.persistence.size }} ({{ .Values.persistence.accessMode }})
   {{- else }}
   Persistent storage: disabled (using emptyDir)
   {{- end }}
 
+{{ if include "firmirror.daemonEnabled" . -}}
+To check the daemon:
+
+  kubectl get deployment {{ include "firmirror.fullname" . }} -n {{ .Release.Namespace }}
+
+To view its logs:
+
+  kubectl logs -n {{ .Release.Namespace }} deployment/{{ include "firmirror.fullname" . }} --tail=100
+
+{{ if (.Values.bkc | default dict).url -}}
+It publishes the metadata again when the rollout rings change.
+
+{{ end -}}
+It serves Prometheus metrics on port {{ include "firmirror.metricsPort" . }} at /metrics.
+
+{{- if .Values.signing.enabled }}
+
+It signs with the keys as the Secret holds them at each publish, and signs an unchanged
+document again only at startup, so to publish with a new key without waiting for a change
+restart it:
+
+  kubectl rollout restart deployment/{{ include "firmirror.fullname" . }} -n {{ .Release.Namespace }}
+{{- end }}
+{{- else -}}
 To check the status of your CronJob:
 
   kubectl get cronjob {{ include "firmirror.fullname" . }} -n {{ .Release.Namespace }}
@@ -51,12 +81,13 @@ Do not start it while a refresh is running.
 To view logs from the latest job:
 
   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component!=regen --tail=100
+{{- end }}
 
 {{- if .Values.persistence.enabled }}
 
 To access the firmware repository data:
 
-  kubectl exec -it -n {{ .Release.Namespace }} <pod-name> -- ls -lh {{ .Values.outputDir }}
+  kubectl exec -it -n {{ .Release.Namespace }} <pod-name> -- ls -lh {{ .Values.storage.outputDir }}
 {{- end }}
 
 For more information, visit: https://github.com/premday/firmirror

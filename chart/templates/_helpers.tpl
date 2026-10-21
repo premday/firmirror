@@ -144,6 +144,51 @@ The arguments of the refresh
 {{- end }}
 
 {{/*
+The arguments of the daemon, which does what the refresh and the metadata
+regeneration do.
+*/}}
+{{- define "firmirror.daemonArgs" -}}
+{{- $daemon := .Values.daemon | default dict }}
+- "daemon"
+{{- include "firmirror.commonArgs" . }}
+{{- include "firmirror.vendorArgs" . }}
+- {{ printf "--daemon.refresh-interval=%s" ($daemon.refreshInterval | default "24h") | quote }}
+- {{ printf "--daemon.bkc-poll-interval=%s" ($daemon.bkcPollInterval | default "15m") | quote }}
+- {{ printf "--daemon.retry-interval=%s" ($daemon.retryInterval | default "15m") | quote }}
+- {{ printf "--daemon.refresh-timeout=%v" (ternary "12h" $daemon.refreshTimeout (kindIs "invalid" $daemon.refreshTimeout)) | quote }}
+- {{ printf "--daemon.regen-timeout=%v" (ternary "1h" $daemon.regenTimeout (kindIs "invalid" $daemon.regenTimeout)) | quote }}
+- {{ printf "--daemon.metrics-address=:%v" (include "firmirror.metricsPort" .) | quote }}
+{{- range .Values.extraArgs }}
+- {{ . | quote }}
+{{- end }}
+{{- range $daemon.extraArgs }}
+- {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+Whether the daemon replaces the CronJobs.
+*/}}
+{{- define "firmirror.daemonEnabled" -}}
+{{- if (.Values.daemon | default dict).enabled }}true{{ end }}
+{{- end }}
+
+{{/*
+The metrics port of the daemon.
+*/}}
+{{- define "firmirror.metricsPort" -}}
+{{- (((.Values.daemon | default dict).metrics) | default dict).port | default 9090 }}
+{{- end }}
+
+{{/*
+The name of the metrics Service. A Service name is limited to 63 characters, so the
+fullname is truncated to leave room for the suffix.
+*/}}
+{{- define "firmirror.metricsServiceName" -}}
+{{- printf "%s-metrics" (include "firmirror.fullname" . | trunc 55 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
 The arguments of the metadata regeneration.
 */}}
 {{- define "firmirror.regenArgs" -}}
@@ -172,7 +217,8 @@ characters, so the fullname is truncated to leave room for the suffix.
 
 {{/*
 The spec of a pod that runs firmirror, called with the root context (root), the
-command arguments (args), restartPolicy and terminationGracePeriodSeconds.
+command arguments (args), restartPolicy and terminationGracePeriodSeconds, and
+the container ports (ports) and probes (probes) if it serves any.
 */}}
 {{- define "firmirror.podSpec" -}}
 {{- $root := .root -}}
@@ -184,7 +230,7 @@ imagePullSecrets:
 securityContext:
   {{- toYaml $root.Values.podSecurityContext | nindent 2 }}
 restartPolicy: {{ .restartPolicy }}
-{{- if .terminationGracePeriodSeconds }}
+{{- if not (kindIs "invalid" .terminationGracePeriodSeconds) }}
 terminationGracePeriodSeconds: {{ .terminationGracePeriodSeconds }}
 {{- end }}
 containers:
@@ -211,6 +257,13 @@ containers:
   {{- end }}
   resources:
     {{- toYaml $root.Values.resources | nindent 4 }}
+  {{- with .ports }}
+  ports:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .probes }}
+    {{- toYaml . | nindent 2 }}
+  {{- end }}
   {{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
   volumeMounts:
   {{- if not $root.Values.storage.s3.enabled }}
@@ -280,5 +333,5 @@ ttlSecondsAfterFinished: {{ .ttl | int64 }}
 template:
   {{- include "firmirror.podMetadata" (dict "root" $root "labels" .labels) | nindent 2 }}
   spec:
-    {{- include "firmirror.podSpec" (dict "root" $root "args" .args "restartPolicy" .restartPolicy "terminationGracePeriodSeconds" $root.Values.cronjob.terminationGracePeriodSeconds) | nindent 4 }}
+    {{- include "firmirror.podSpec" (dict "root" $root "args" .args "restartPolicy" .restartPolicy "terminationGracePeriodSeconds" ($root.Values.cronjob.terminationGracePeriodSeconds | default nil)) | nindent 4 }}
 {{- end }}
