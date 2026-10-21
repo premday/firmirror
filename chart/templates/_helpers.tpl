@@ -171,6 +171,99 @@ characters, so the fullname is truncated to leave room for the suffix.
 {{- end }}
 
 {{/*
+The spec of a pod that runs firmirror, called with the root context (root), the
+command arguments (args), restartPolicy and terminationGracePeriodSeconds.
+*/}}
+{{- define "firmirror.podSpec" -}}
+{{- $root := .root -}}
+serviceAccountName: {{ include "firmirror.serviceAccountName" $root }}
+{{- with $root.Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+securityContext:
+  {{- toYaml $root.Values.podSecurityContext | nindent 2 }}
+restartPolicy: {{ .restartPolicy }}
+{{- if .terminationGracePeriodSeconds }}
+terminationGracePeriodSeconds: {{ .terminationGracePeriodSeconds }}
+{{- end }}
+containers:
+- name: firmirror
+  securityContext:
+    {{- toYaml $root.Values.securityContext | nindent 4 }}
+  image: "{{ $root.Values.image.repository }}:{{ include "firmirror.imageTag" $root }}"
+  imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+  command: ["/bin/firmirror"]
+  args:
+    {{- .args | nindent 4 }}
+  {{- if and $root.Values.storage.s3.enabled $root.Values.storage.s3.secretName }}
+  env:
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: {{ $root.Values.storage.s3.secretName }}
+        key: AWS_ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: {{ $root.Values.storage.s3.secretName }}
+        key: AWS_SECRET_ACCESS_KEY
+  {{- end }}
+  resources:
+    {{- toYaml $root.Values.resources | nindent 4 }}
+  {{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
+  volumeMounts:
+  {{- if not $root.Values.storage.s3.enabled }}
+  - name: data
+    mountPath: {{ $root.Values.storage.outputDir }}
+  {{- end }}
+  {{- if $root.Values.signing.enabled }}
+  - name: secrets
+    mountPath: /secrets
+    readOnly: true
+  {{- end }}
+  {{- end }}
+{{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
+volumes:
+{{- if not $root.Values.storage.s3.enabled }}
+- name: data
+  {{- if $root.Values.persistence.enabled }}
+  persistentVolumeClaim:
+    claimName: {{ $root.Values.persistence.existingClaim | default (include "firmirror.fullname" $root) }}
+  {{- else }}
+  emptyDir: {}
+  {{- end }}
+{{- end }}
+{{- if $root.Values.signing.enabled }}
+- name: secrets
+  secret:
+    secretName: {{ $root.Values.signing.secretName }}
+    items:
+    - key: {{ $root.Values.signing.certKey }}
+      path: signing.cert
+    - key: {{ $root.Values.signing.pkeyKey }}
+      path: signing.key
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The metadata of a pod that runs firmirror, called with the root context (root)
+and extra pod labels (labels).
+*/}}
+{{- define "firmirror.podMetadata" -}}
+{{- $root := .root -}}
+metadata:
+  labels:
+    {{- /* The labels the selectors use win over podLabels, which would otherwise repeat a key. */}}
+    {{- merge (include "firmirror.selectorLabels" $root | fromYaml) (default (dict) .labels) (default (dict) $root.Values.podLabels) | toYaml | nindent 4 }}
+  {{- with $root.Values.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{/*
 The spec of the Job a CronJob creates, called with the root context (root), the
 command arguments (args), backoffLimit, restartPolicy, the ttl of the finished
 Job (nil for none) and extra pod labels (labels).
@@ -185,82 +278,7 @@ activeDeadlineSeconds: {{ $root.Values.cronjob.activeDeadlineSeconds }}
 ttlSecondsAfterFinished: {{ .ttl | int64 }}
 {{- end }}
 template:
-  metadata:
-    labels:
-      {{- /* The labels the selectors use win over podLabels, which would otherwise repeat a key. */}}
-      {{- merge (include "firmirror.selectorLabels" $root | fromYaml) (default (dict) .labels) (default (dict) $root.Values.podLabels) | toYaml | nindent 6 }}
-    {{- with $root.Values.podAnnotations }}
-    annotations:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
+  {{- include "firmirror.podMetadata" (dict "root" $root "labels" .labels) | nindent 2 }}
   spec:
-    {{- with $root.Values.imagePullSecrets }}
-    imagePullSecrets:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
-    serviceAccountName: {{ include "firmirror.serviceAccountName" $root }}
-    securityContext:
-      {{- toYaml $root.Values.podSecurityContext | nindent 6 }}
-    restartPolicy: {{ .restartPolicy }}
-    {{- if $root.Values.cronjob.terminationGracePeriodSeconds }}
-    terminationGracePeriodSeconds: {{ $root.Values.cronjob.terminationGracePeriodSeconds }}
-    {{- end }}
-    containers:
-    - name: firmirror
-      securityContext:
-        {{- toYaml $root.Values.securityContext | nindent 8 }}
-      image: "{{ $root.Values.image.repository }}:{{ include "firmirror.imageTag" $root }}"
-      imagePullPolicy: {{ $root.Values.image.pullPolicy }}
-      command: ["/bin/firmirror"]
-      args:
-        {{- .args | nindent 8 }}
-      {{- if and $root.Values.storage.s3.enabled $root.Values.storage.s3.secretName }}
-      env:
-      - name: AWS_ACCESS_KEY_ID
-        valueFrom:
-          secretKeyRef:
-            name: {{ $root.Values.storage.s3.secretName }}
-            key: AWS_ACCESS_KEY_ID
-      - name: AWS_SECRET_ACCESS_KEY
-        valueFrom:
-          secretKeyRef:
-            name: {{ $root.Values.storage.s3.secretName }}
-            key: AWS_SECRET_ACCESS_KEY
-      {{- end }}
-      resources:
-        {{- toYaml $root.Values.resources | nindent 8 }}
-      {{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
-      volumeMounts:
-      {{- if not $root.Values.storage.s3.enabled }}
-      - name: data
-        mountPath: {{ $root.Values.storage.outputDir }}
-      {{- end }}
-      {{- if $root.Values.signing.enabled }}
-      - name: secrets
-        mountPath: /secrets
-        readOnly: true
-      {{- end }}
-      {{- end }}
-    {{- if or (not $root.Values.storage.s3.enabled) $root.Values.signing.enabled }}
-    volumes:
-    {{- if not $root.Values.storage.s3.enabled }}
-    - name: data
-      {{- if $root.Values.persistence.enabled }}
-      persistentVolumeClaim:
-        claimName: {{ $root.Values.persistence.existingClaim | default (include "firmirror.fullname" $root) }}
-      {{- else }}
-      emptyDir: {}
-      {{- end }}
-    {{- end }}
-    {{- if $root.Values.signing.enabled }}
-    - name: secrets
-      secret:
-        secretName: {{ $root.Values.signing.secretName }}
-        items:
-        - key: {{ $root.Values.signing.certKey }}
-          path: signing.cert
-        - key: {{ $root.Values.signing.pkeyKey }}
-          path: signing.key
-    {{- end }}
-    {{- end }}
+    {{- include "firmirror.podSpec" (dict "root" $root "args" .args "restartPolicy" .restartPolicy "terminationGracePeriodSeconds" $root.Values.cronjob.terminationGracePeriodSeconds) | nindent 4 }}
 {{- end }}
