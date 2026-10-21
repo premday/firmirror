@@ -24,11 +24,14 @@ func validateFirmwareBaseURL(baseURL string) error {
 	return nil
 }
 
+// isURL reports whether a location is published as a URL, not as a bare name.
+func isURL(location string) bool { return strings.Contains(location, "://") }
+
 // bareLocation reduces a published location to the name the package is stored
 // under. Packages are keyed by that name, so everything that compares
 // locations (superseding, cleaning up) works on it rather than on the URL.
 func bareLocation(location string) string {
-	if !strings.Contains(location, "://") {
+	if !isURL(location) {
 		return location
 	}
 	u, err := url.Parse(location)

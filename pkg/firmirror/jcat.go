@@ -179,12 +179,11 @@ const (
 	jcatRepublished
 )
 
-// storedJCATState compares the stored JCAT with the metadata this run read, then
-// with the one stored now.
-func (f *FirmirrorSyncer) storedJCATState(ctx context.Context) (jcatState, error) {
-	jcat, err := f.readStoredJCAT(ctx)
-	if err != nil || jcat == nil {
-		return jcatStale, err
+// storedJCATState compares the stored JCAT, as readStoredJCAT returned it, with
+// the metadata this run read, then with the one stored now.
+func (f *FirmirrorSyncer) storedJCATState(ctx context.Context, jcat *storedJCAT, readErr error) (jcatState, error) {
+	if readErr != nil || jcat == nil {
+		return jcatStale, readErr
 	}
 	if jcat.hasChecksum(f.stored.file) {
 		if f.signing() && !jcat.isSigned() {
@@ -193,7 +192,7 @@ func (f *FirmirrorSyncer) storedJCATState(ctx context.Context) (jcatState, error
 		return jcatCurrent, nil
 	}
 
-	compressed, exists, err := f.readStoredFile(ctx)
+	compressed, exists, err := readStoredFile(ctx, f.Storage)
 	if err != nil || !exists {
 		return jcatStale, err
 	}
