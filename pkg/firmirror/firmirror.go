@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/premday/firmirror/pkg/bkc"
 	"github.com/premday/firmirror/pkg/lvfs"
 )
 
@@ -39,6 +40,10 @@ type FirmirrorConfig struct {
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
 	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
+
+	// BKC defines what each rollout ring serves, which the releases are tagged
+	// with. Nil publishes no ring tag.
+	BKC *bkc.File
 }
 
 type FirmirrorSyncer struct {
@@ -77,6 +82,11 @@ func (p fingerprint) known() bool {
 func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSyncer, error) {
 	if err := validateFirmwareBaseURL(config.FirmwareBaseURL); err != nil {
 		return nil, err
+	}
+	if config.BKC != nil {
+		if err := config.BKC.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid rollout rings: %w", err)
+		}
 	}
 
 	// Create cache directory if it doesn't exist
@@ -441,6 +451,12 @@ func (f *FirmirrorSyncer) readStored(ctx context.Context) (*storedMetadata, erro
 	if err != nil || !exists {
 		return nil, err
 	}
+	return parseStored(compressed)
+}
+
+// parseStored parses the published file. The tags of its releases are attached
+// to them, and the pieces of a component put together.
+func parseStored(compressed []byte) (*storedMetadata, error) {
 	data, err := decompress(compressed)
 	if err != nil {
 		return nil, err
@@ -450,6 +466,7 @@ func (f *FirmirrorSyncer) readStored(ctx context.Context) (*storedMetadata, erro
 	if err := xml.Unmarshal(data, &components); err != nil {
 		return nil, fmt.Errorf("failed to parse metadata XML: %w", err)
 	}
+	components.Component = lvfs.PoolByKey(components.Component)
 	return &storedMetadata{components: &components, fingerprint: fingerprintOf(data, compressed)}, nil
 }
 
@@ -581,7 +598,8 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 }
 
 // buildDocument merges what is stored with what this run mirrored and returns the
-// document to publish, sorted by component for a deterministic output.
+// document to publish, sorted by component for a deterministic output, with the
+// releases tagged for the rings the definitions have them serve.
 func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string) {
 	componentMap, supersededLocations := mergeComponents(f.existingMetadata, f.newComponents, replaceSuperseded)
 
@@ -608,12 +626,19 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 		document.Component = append(document.Component, *component)
 	}
 
+	if f.Config.BKC != nil {
+		f.Config.BKC.Apply(document.Component).LogTo(slog.With("component", "bkc"))
+	}
+
 	return document, supersededLocations
 }
 
-// renderMetadata is the XML a document is published as.
+// renderMetadata is the XML a document is published as, its components grouped
+// by tag set.
 func (f *FirmirrorSyncer) renderMetadata(document *lvfs.Components) ([]byte, error) {
-	xmlBytes, err := xml.MarshalIndent(rewriteLocations(document, f.publishedLocation), "", "  ")
+	published := rewriteLocations(document, f.publishedLocation)
+	published.Component = lvfs.GroupByTags(published.Component)
+	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal metadata XML: %w", err)
 	}
