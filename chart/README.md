@@ -54,7 +54,13 @@ The following table lists the configurable parameters of the Firmirror chart and
 | `storage.s3.region` | AWS region | `""` |
 | `storage.s3.endpoint` | Custom S3 endpoint (for MinIO, etc.) | `""` |
 | `storage.s3.secretName` | Secret containing AWS credentials | `""` |
-| `firmwareBaseUrl` | Public URL the output is served from (the remote's `FirmwareBaseURI`); packages are then named by absolute URL in the metadata | `""` (bare file names) |
+| `firmwareBaseUrl` | Public URL the output is served from (the remote's `FirmwareBaseURI`); packages are then named by absolute URL in the metadata. Passed to the refresh and the `regen-metadata` Job alike | `""` (bare file names) |
+| `bkc.url` | Where the refresh and the `regen-metadata` Job read what each rollout ring serves, an HTTP(S) URL (plain HTTP needs `bkc.allowHttp`). Empty publishes no ring tag | `""` |
+| `bkc.allowHttp` | Also read it from a plain HTTP URL, for a network that is trusted | `false` |
+| `extraArgs` | More arguments of the refresh, such as `--force` | `[]` |
+| `bkc.regen.extraArgs` | More arguments of the `regen-metadata` Job, such as `--force` | `[]` |
+| `bkc.regen.ttlSecondsAfterFinished` | Time to keep a finished `regen-metadata` Job, whose logs are the record of what was published. 0 deletes it as soon as it finishes, unlike for the refresh, where 0 sets no TTL | `604800` (7 days) |
+| `bkc.regen.historyLimit` | Finished `regen-metadata` Jobs kept, successful and failed each, whatever their TTL. 0 keeps none | `10` |
 | `externalSecret.create` | Create an ExternalSecret resource | `false` |
 | `externalSecret.secretStoreRef` | Reference to the SecretStore | `""` |
 | `externalSecret.targetSecret` | Name of the secret to create | `""` |
@@ -93,3 +99,32 @@ The following table lists the configurable parameters of the Firmirror chart and
 ## License
 
 See the main project repository for license information.
+
+## Rollout rings
+
+With `bkc.url` set, the refresh reads a YAML file saying which version of each
+component every rollout ring serves, and tags the releases it publishes
+accordingly. A host joins a ring with `HostBkc=<tag prefix>-<ring>` in `fwupd.conf`
+followed by `fwupdmgr sync`; nothing else is deployed to the hosts. The file is
+edited with `firmirror bkc promote`, outside the cluster, and reviewed like any
+other change, see the main README. A refresh that cannot read it fails and is
+retried.
+
+Publishing the metadata again without mirroring anything, to publish new
+definitions now and not at the next refresh, or for a new signing key, which the
+refresh would not publish, is an action and not a schedule. The chart creates a
+**suspended CronJob** named `<fullname>-regen-metadata`, with the name of the
+refresh CronJob as `<fullname>`, when the storage is S3 or a volume. A
+`<fullname>` over 37 characters is cut short, as Kubernetes limits a CronJob
+name to 52 (the notes printed by `helm install` give the exact name). It is built
+from the same Job spec as the refresh, with the same image, storage, credentials,
+signing keys and base URL, because it publishes the metadata the refresh
+publishes. Start it as a Job:
+
+```bash
+kubectl create job --from=cronjob/firmirror-regen-metadata regen-metadata-$(date +%s)
+```
+
+It is never retried, whatever `cronjob.backoffLimit` and `cronjob.restartPolicy`
+say for the refresh. `concurrencyPolicy: Forbid` stops a CronJob from overlapping
+itself, not another CronJob: do not start it while a refresh is running.
