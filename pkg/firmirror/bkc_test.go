@@ -92,12 +92,33 @@ func TestSaveMetadataTagsWhatTheDefinitionsSay(t *testing.T) {
 	}, publishedTags(t, dir), "newer firmware is served by no ring until the definitions name it")
 }
 
-func TestSaveMetadataPublishesNoRingWithoutDefinitions(t *testing.T) {
+func TestSaveMetadataRefusesToTakeEveryRingTagOff(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
 	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
 	require.Equal(t, []string{"firmirror-dev"}, publishedTags(t, dir)["10.0"])
 
-	refresh(t, dir, nil)
+	forgetful := newRingsSyncer(t, dir, nil)
+	require.NoError(t, forgetful.LoadMetadata(ctx))
+	forgetful.newComponents = []lvfs.Component{versioned("20.0", "b.cab")}
+	assert.ErrorContains(t, forgetful.SaveMetadata(ctx), "ring tags")
+	assert.Equal(t, []string{"firmirror-dev"}, publishedTags(t, dir)["10.0"], "a refresh with no definitions must not unserve every host")
+
+	stale := newRingsSyncer(t, dir, bkc.New([]string{"dev"}))
+	require.NoError(t, stale.LoadMetadata(ctx))
+	stale.newComponents = []lvfs.Component{versioned("20.0", "b.cab")}
+	assert.ErrorContains(t, stale.SaveMetadata(ctx), "ring tags", "nor does a definitions file that names nothing")
+}
+
+func TestSaveMetadataPublishesNoRingWhenAllowedTo(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+
+	syncer := newRingsSyncer(t, dir, nil)
+	syncer.Config.Force = true
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	require.NoError(t, syncer.SaveMetadata(ctx))
 
 	assert.Empty(t, publishedTags(t, dir)["10.0"], "the tags are an output of the definitions, not something a document keeps")
 }

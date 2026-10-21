@@ -26,13 +26,13 @@ func ReadMetadata(ctx context.Context, source string, strict bool) ([]lvfs.Compo
 	return componentsOf(components, "the metadata from "+shown, "its components are not built the way this firmirror identifies them")
 }
 
-// baseURLDropped is the refusal to regenerate the stored document without the base
-// URL of its locations, which is what an operator who forgot --firmware-base-url
-// would do, and which only the stored document tells. Force overrides it. The
-// tags are held to what the publish checks.
+// baseURLDropped refuses to publish bare locations over a stored document whose
+// locations are URLs, which is what forgetting --firmware-base-url does.
+// DropBaseURL overrides it, Force does not.
 func (f *FirmirrorSyncer) baseURLDropped() error {
-	if f.facts.absolute && f.Config.FirmwareBaseURL == "" && !f.Config.Force {
-		return errors.New("regenerating would take the base URL out of the locations of the stored metadata, as none is given (--firmware-base-url): pass it, or force it if that is the point")
+	if f.facts.absolute && f.Config.FirmwareBaseURL == "" && !f.Config.DropBaseURL {
+		return errors.New("the stored metadata names its packages by URL under a base URL, and none is given (--firmware-base-url), " +
+			"which would name them by bare file name, as fwupd remotes that set FirmwareBaseURI reject: pass it, or drop it if that is the point")
 	}
 	return nil
 }
@@ -46,10 +46,6 @@ func (f *FirmirrorSyncer) RegenerateMetadata(ctx context.Context) error {
 	if err := f.noMetadata(); err != nil {
 		return err
 	}
-	if err := f.baseURLDropped(); err != nil {
-		return err
-	}
-
 	document, _ := f.buildDocument(false)
 	outcome, err := f.writeMetadata(ctx, document, true)
 	if err != nil {

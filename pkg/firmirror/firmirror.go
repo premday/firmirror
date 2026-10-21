@@ -41,7 +41,8 @@ type FirmirrorConfig struct {
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
 	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
-	Force                       bool   // RegenerateMetadata regenerates even if that takes the base URL out of the stored document
+	Force                       bool   // Publish even if that takes ring tags out of the stored document
+	DropBaseURL                 bool   // Publish locations without the base URL the stored document has, which Force does not allow
 
 	// BKC defines what each rollout ring serves, which the releases are tagged
 	// with. Nil publishes no ring tag.
@@ -60,11 +61,12 @@ type FirmirrorSyncer struct {
 	stored fingerprint // Of the document in storage, as of the last time it was read or written
 }
 
-// storedFacts is what a published document had, before its pieces were put
-// together again.
+// storedFacts is what a published document says of itself, read before its
+// pieces are put together again.
 type storedFacts struct {
-	schema   int  // The schema version, 0 when it says none
-	absolute bool // Whether locations are URLs
+	schema   int      // The schema version, 0 when it says none
+	tags     []string // Component tags in the lvfs namespace, sorted
+	absolute bool     // Whether locations are URLs
 }
 
 // fingerprint identifies a published document by the digest of its XML, which a
@@ -479,12 +481,21 @@ func parseStored(compressed []byte) (*storedMetadata, error) {
 		return nil, err
 	}
 	stored := &storedMetadata{components: components, fingerprint: fingerprintOf(data, compressed), facts: storedFacts{schema: components.SchemaVersion}}
+	tags := make(map[string]struct{})
 	for _, component := range components.Component {
+		if component.Tags != nil {
+			for _, tag := range component.Tags.Tag {
+				if tag.Namespace == lvfs.TagNamespace {
+					tags[tag.Value] = struct{}{}
+				}
+			}
+		}
 		for _, release := range component.Releases {
 			stored.facts.absolute = stored.facts.absolute || isURL(release.Location) ||
 				slices.ContainsFunc(release.Artifacts, func(artifact lvfs.Artifact) bool { return isURL(artifact.Location) })
 		}
 	}
+	stored.facts.tags = slices.Sorted(maps.Keys(tags))
 	return stored, nil
 }
 
@@ -500,6 +511,63 @@ func decodeStored(compressed []byte) (*lvfs.Components, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to parse metadata XML: %w", err)
 	}
 	return &components, data, nil
+}
+
+// untagging refuses to publish without a ring tag the stored document has, as
+// the hosts on that ring would stop matching releases. Force overrides it.
+func (f *FirmirrorSyncer) untagging() error {
+	if f.Config.Force {
+		return nil
+	}
+	possible := f.possibleTags()
+	dropped := slices.DeleteFunc(slices.Clone(f.facts.tags), func(tag string) bool {
+		_, kept := slices.BinarySearch(possible, tag)
+		return kept
+	})
+	if len(dropped) == 0 {
+		return nil
+	}
+	shown := dropped[:min(len(dropped), 5)]
+	return fmt.Errorf("the stored metadata has ring tags that would no longer be published (%s, %d in all), which takes the hosts on those rings off them: "+
+		"check the rollout ring definitions (--bkc.file), or force it if that is the point", strings.Join(shown, ", "), len(dropped))
+}
+
+// noRingTag refuses a built document with no ring tag at all over a stored one
+// that has some: that means definitions for another mirror, not a ring whose
+// versions were lost. A stored document discarded for its schema version is exempt,
+// as the re-mirror is only partly tagged until it finishes. Force overrides it.
+func (f *FirmirrorSyncer) noRingTag(published []string) error {
+	if f.Config.Force || f.existingMetadata == nil || len(f.facts.tags) == 0 || len(published) > 0 {
+		return nil
+	}
+	return errors.New("the document to publish has no ring tag at all, although the stored metadata has some: the definitions name nothing the mirror has, " +
+		"which takes every host off its ring: check the rollout ring definitions (--bkc.file), or force it if that is the point")
+}
+
+// checkTags is what a built document must pass before it is published: no stored
+// ring tag dropped, and some ring tag when the stored document has some.
+func (f *FirmirrorSyncer) checkTags(published []string) error {
+	if err := f.untagging(); err != nil {
+		return err
+	}
+	return f.noRingTag(published)
+}
+
+// possibleTags are the tags the definitions can publish, sorted: those of the
+// rings some entry names a version for. A ring whose versions the mirror lost
+// still counts, as its hosts stay where they are.
+func (f *FirmirrorSyncer) possibleTags() []string {
+	if f.Config.BKC == nil {
+		return nil
+	}
+	var tags []string
+	for _, ring := range f.Config.BKC.Rings {
+		if slices.ContainsFunc(f.Config.BKC.Components, func(entry bkc.Entry) bool { return entry.Versions[ring] != "" }) {
+			tags = append(tags, f.Config.BKC.Tag(ring))
+		}
+	}
+	slices.Sort(tags)
+	return tags
 }
 
 // signatureKept refuses to publish without signing keys over a signed JCAT, which
@@ -529,9 +597,20 @@ func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
 
 // Preflight fails, before anything is mirrored, on what the publish at the end of
 // the run would refuse, which is long after the packages were downloaded and
-// uploaded, to be mirrored again by the next run: no signing keys over a JCAT that
-// is signed. The publish checks it again.
+// uploaded, to be mirrored again by the next run: a stored ring tag that no ring
+// of the definitions could publish, which is every one when they are not given,
+// the base URL of the stored locations when none is given, and no signing keys
+// over a JCAT that is signed. The publish checks them again, and also that the
+// document built has some ring tag at all, which only it can tell. A ring whose
+// versions the mirror lost can still publish its tag, and its hosts stay where
+// they are, so what the built document tags is not otherwise held to it.
 func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
+	if err := f.untagging(); err != nil {
+		return err
+	}
+	if err := f.baseURLDropped(); err != nil {
+		return err
+	}
 	if f.signing() || !f.stored.known() {
 		return nil
 	}
@@ -697,6 +776,18 @@ func (f *FirmirrorSyncer) renderMetadata(document *lvfs.Components) ([]byte, err
 	return append([]byte(xml.Header), xmlBytes...), nil
 }
 
+func tagsOf(document *lvfs.Components) []string {
+	tags := make(map[string]struct{})
+	for _, component := range document.Component {
+		for _, release := range component.Releases {
+			for _, tag := range release.Tags {
+				tags[tag] = struct{}{}
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(tags))
+}
+
 // settled decides, from what the stored JCAT says of the stored metadata, whether
 // there is nothing to write: the document is unchanged and its JCAT is current, or
 // the metadata was published by another run since this one read it. A write that
@@ -760,6 +851,14 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 		}
 	}
 
+	tags := tagsOf(document)
+	if err := f.checkTags(tags); err != nil {
+		return metadataWritten, err
+	}
+	if err := f.baseURLDropped(); err != nil {
+		return metadataWritten, err
+	}
+
 	// Publishing without signing keys would replace a signed JCAT with checksums
 	// alone, which clients that require signatures reject. There is no signature to
 	// protect when there is no stored metadata for it to belong to.
@@ -816,6 +915,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	}
 
 	f.stored = fingerprint{document: digest, file: fileChecksum(compressedBuf.Bytes())}
+	f.facts = storedFacts{schema: document.SchemaVersion, tags: tags, absolute: f.Config.FirmwareBaseURL != ""}
 	return metadataWritten, nil
 }
 
