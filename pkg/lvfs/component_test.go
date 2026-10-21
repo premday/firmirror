@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPoolByKey(t *testing.T) {
@@ -33,6 +34,22 @@ func TestPoolByKey(t *testing.T) {
 	assert.Equal(t, "g2", pooled[2].Provides[0].Text)
 	assert.Len(t, original[0].Releases, 1)
 	assert.Empty(t, original[0].Releases[:cap(original[0].Releases)][1].Version, "the pieces it was given are not written into")
+}
+
+func TestPoolByKeyNeverWritesIntoWhatItWasGiven(t *testing.T) {
+	spare := make([]Release, 1, 8)
+	spare[0] = Release{Version: "1"}
+	first := Component{ID: "a", Releases: spare}
+	second := Component{ID: "a", Releases: []Release{{Version: "2"}}}
+	alone := Component{ID: "b", Releases: []Release{{Version: "3"}}}
+
+	pooled := PoolByKey([]Component{first, second, alone})
+
+	require.Len(t, pooled, 2)
+	assert.Len(t, pooled[0].Releases, 2)
+	assert.Equal(t, 1, len(spare))
+	assert.Equal(t, Release{}, spare[:2][1], "the spare capacity of the given slice is not written to")
+	assert.Same(t, &alone.Releases[0], &pooled[1].Releases[0], "a component published in one piece is not copied")
 }
 
 func TestComponentGUIDs(t *testing.T) {

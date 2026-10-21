@@ -36,19 +36,24 @@ func distinct(guids []string) []string {
 }
 
 // PoolByKey puts together the pieces a component was published in, keeping the
-// order of their first appearance. The releases are copied, so appending to a
-// pooled component never writes into the slices it was given.
+// order of their first appearance. A component published in one piece shares its
+// releases with the one it was given, so a caller that edits the result copies
+// them first. Pooling appends to a copy and never writes into the input.
 func PoolByKey(components []Component) []Component {
 	pooled := make([]Component, 0, len(components))
 	index := make(map[string]int, len(components))
+	owned := make(map[int]struct{})
 	for _, component := range components {
 		key := ComponentKey(component)
 		if at, ok := index[key]; ok {
+			if _, mine := owned[at]; !mine {
+				pooled[at].Releases = slices.Clone(pooled[at].Releases)
+				owned[at] = struct{}{}
+			}
 			pooled[at].Releases = append(pooled[at].Releases, component.Releases...)
 			continue
 		}
 		index[key] = len(pooled)
-		component.Releases = slices.Clone(component.Releases)
 		pooled = append(pooled, component)
 	}
 	return pooled
