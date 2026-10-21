@@ -46,7 +46,10 @@ func (f *FirmirrorSyncer) RegenerateMetadata(ctx context.Context) error {
 	if err := f.noMetadata(); err != nil {
 		return err
 	}
-	document, _ := f.buildDocument(false)
+	document, _, report := f.buildDocument(false)
+	if report != nil {
+		report.LogTo(slog.With("component", "bkc"))
+	}
 	outcome, err := f.writeMetadata(ctx, document, true)
 	if err != nil {
 		return err
