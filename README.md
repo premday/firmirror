@@ -36,6 +36,8 @@ On Debian/Ubuntu:
 sudo apt install fwupd jcat
 ```
 
+Downloads, and the reads of the rollout rings, honour `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`: list a mirror on the local network in `NO_PROXY`.
+
 ## Installation
 
 ### From Source
@@ -270,7 +272,8 @@ Both vendors publish their repository over rsync as well as over HTTP, as
 a copy can mirror from that copy instead of from the vendor. `--hpe.base-url`
 and `--dell.base-url` take whatever the copy is reachable as: an HTTP(S) URL, a
 `file://` URL, or a plain directory, which is read where it sits with no web
-server in front of it.
+server in front of it. A `file://` URL names the path as `file:///absolute/path`
+or `file:relative/path`; one that names another host is refused.
 
 ```bash
 # Mirror from directories kept up to date with rsync
