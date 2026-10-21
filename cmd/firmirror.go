@@ -50,6 +50,19 @@ type BKC struct {
 	Rings     []string `help:"The rings of a file bkc promote creates, in promotion order: the first takes the newest mirrored release when it is promoted, and each other ring is promoted from the one before it. A file that exists keeps its own. Default: ${rings}."`
 }
 
+// Overrides are the flags that let a publish do what it refuses. Each covers one
+// refusal only: forcing a ring tag out does not also drop the signature or the
+// base URL, which are easily forgotten.
+type Overrides struct {
+	Force       bool `help:"Publish even if that stops publishing a ring tag the stored metadata has, as an absent or stale --bkc.file, another tag prefix or a removed ring would, which takes the hosts on that ring off it." default:"false"`
+	StopSigning bool `help:"Publish without signing keys over a JCAT that is signed, which clients that require signed metadata then reject: to stop signing on purpose." default:"false"`
+	DropBaseURL bool `help:"Publish package locations without the base URL the stored metadata has, as a forgotten --firmware-base-url would, which fwupd remotes that set FirmwareBaseURI reject: to drop it on purpose." default:"false"`
+}
+
+func (o Overrides) apply(config *firmirror.FirmirrorConfig) {
+	config.Force, config.StopSigning, config.DropBaseURL = o.Force, o.StopSigning, o.DropBaseURL
+}
+
 var args struct {
 	DellFlags       `embed:"" prefix:"dell." group:"Dell" help:"Dell firmware fetching."`
 	HPEFlags        `embed:"" prefix:"hpe." group:"HPE" help:"HPE firmware fetching."`
@@ -60,10 +73,12 @@ var args struct {
 	FirmwareBaseURL string `help:"Public URL the output directory or bucket is served from, as the fwupd remote's FirmwareBaseURI sees it. When set, the metadata names each package by absolute URL under it; without it the names are bare file names, which fwupd rejects with 'failed to parse url' for a remote that sets FirmwareBaseURI." default:""`
 	Concurrency     int    `help:"Maximum number of firmware entries downloaded and processed concurrently per vendor" default:"8"`
 	Refresh         struct {
-		Force       bool `help:"Publish even if that stops publishing a ring tag the stored metadata has, as an absent or stale --bkc.file, another tag prefix or a removed ring would, which takes the hosts on that ring off it. Without it such a refresh fails, before it mirrors anything where it can." default:"false"`
-		StopSigning bool `help:"Publish without signing keys over a JCAT that is signed, which clients that require signed metadata then reject: to stop signing on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
-		DropBaseURL bool `help:"Publish package locations without the base URL the stored metadata has, as a forgotten --firmware-base-url would, which fwupd remotes that set FirmwareBaseURI reject: to drop it on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
+		Overrides `embed:""`
 	} `cmd:"" help:"Refresh all the firmware from the repositories. Note: this will not replace the already-existing firmware, even if the vendor pushed an updated version. You will need to delete the firmware manually."`
+
+	RegenMetadata struct {
+		Overrides `embed:""`
+	} `cmd:"" name:"regen-metadata" help:"Publish the stored metadata again, rendered with the current rollout rings and signed with the current keys, even if it did not change. Use it when the rings changed, or to sign with a new key."`
 
 	Rollout struct {
 		Status struct {
@@ -96,12 +111,20 @@ var parserVars = kong.Vars{"rings": strings.Join(bkc.DefaultRings, ",")}
 
 func run(command string) error {
 	// Monitor for shutdown signal
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals...)
 	defer stop()
+	// The first signal asks the command to end and the next one ends the process,
+	// unless the command registers for signals itself (see endOnSecondSignal).
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	switch command {
 	case "refresh":
 		return runRefresh(ctx, stop)
+	case "regen-metadata":
+		return runRegenMetadata(ctx)
 	case "bkc status":
 		return runBKCStatus(ctx)
 	case "bkc promote <ring>":
@@ -205,6 +228,36 @@ func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirr
 		return nil, nil, fmt.Errorf("failed to load existing metadata: %w", err)
 	}
 	return syncer, cleanup, nil
+}
+
+var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
+
+// endOnSecondSignal runs cleanup and ends the process on the signal after the
+// first, for a command that keeps going after the first (a publish): ending
+// between the JCAT and the metadata leaves a JCAT that is not the metadata's,
+// which clients reject. A context that is already done counts as the first
+// signal. Call it before the command stops listening for signals itself.
+func endOnSecondSignal(ctx context.Context, cleanup func()) {
+	signals := make(chan os.Signal, 2)
+	// Listen before looking at the context, or a signal in between is lost.
+	signal.Notify(signals, shutdownSignals...)
+	told := ctx.Err() != nil
+	if told {
+		// The signal that ended the context may be queued here too.
+		select {
+		case <-signals:
+		default:
+		}
+	}
+	go func() {
+		if !told {
+			<-signals
+			slog.Warn("Told to end: what is in progress is finished, if anything, as ending a publish would leave it half written. Ending again ends it now.")
+		}
+		<-signals
+		cleanup()
+		os.Exit(1)
+	}()
 }
 
 // loadDefinitions reads the rollout ring definitions, or returns nil when no

@@ -46,10 +46,8 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		CleanupUnreferencedPackages: args.S3.Cleanup,
 		FirmwareBaseURL:             args.FirmwareBaseURL,
 		BKC:                         definitions,
-		Force:                       args.Refresh.Force,
-		StopSigning:                 args.Refresh.StopSigning,
-		DropBaseURL:                 args.Refresh.DropBaseURL,
 	}
+	args.Refresh.apply(&config)
 	if args.BKC.File != "" {
 		// A promotion committed during a long run must not be reverted by the
 		// file the run started with.
@@ -84,6 +82,10 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 	}
 
 	defer func() {
+		// Ending between the JCAT and the metadata leaves a JCAT that is not the
+		// metadata's, which clients reject, so only a second signal ends the publish.
+		// A signal that already ended the run counts as the first.
+		endOnSecondSignal(ctx, func() {})
 		stop()
 		slog.Info("Saving repository metadata")
 		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
