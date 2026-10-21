@@ -364,6 +364,27 @@ func DownloadFileToDest(ctx context.Context, source, file string) error {
 
 const temporaryPrefix = ".firmirror-tmp-"
 
+// RemoveStaleTemporaries removes the temporary files of WriteFileAtomic that are
+// older than age in dir, which a process killed mid-write leaves behind, and
+// returns how many it removed. It looks at dir only, where what is stored is
+// written.
+func RemoveStaleTemporaries(dir string, age time.Duration) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), temporaryPrefix) {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) > age && os.Remove(filepath.Join(dir, entry.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
 // WriteFileAtomic replaces the file at path with data, all or nothing, through a
 // temporary file renamed over it. The data is synced before the rename so a crash
 // leaves the old or the new file, never an empty one.
