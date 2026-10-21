@@ -125,6 +125,19 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | **Signing** | | |
 | `--sign.certificate` | Path to X.509 certificate (.pem or .crt) | `""` |
 | `--sign.private-key` | Path to private key (.pem or .key) | `""` |
+| **Rollout rings** | | |
+| `--bkc.file` | What each rollout ring serves: a YAML file, or the HTTP(S) URL it is fetched from (plain HTTP needs `--bkc.allow-http`). A refresh tags the releases it publishes accordingly, and publishes no ring tag without it. `bkc promote` edits it, so it is a path there | (no ring) |
+| `--bkc.allow-http` | Also read the file, and the `--metadata` of `bkc promote`, from a plain HTTP URL, which whoever is on the way can change | `false` |
+| `--bkc.rings` | The rings of a file `bkc promote` creates, in promotion order | `dev,beta,preview,stable` |
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `refresh` | Mirror the enabled vendors and publish the metadata |
+| `regen-metadata` | Publish the stored metadata again, rendered with the current rollout rings and signed with the current keys, even if it did not change |
+| `bkc status [--ring R]` | Report which version each rollout ring serves for each component, from `--bkc.file` |
+| `bkc promote <ring>` | Move a ring on in the file `--bkc.file` names, which it creates if needed. Nothing is published |
 
 ### Output Structure
 
@@ -153,6 +166,109 @@ A remote that sets `FirmwareBaseURI` needs `--firmware-base-url=https://mirror.e
 `firmirror refresh`. Without it the metadata holds bare file names, and fwupd fails the update with
 `failed to parse url '<sha256>-<file>.cab'`. A remote without `FirmwareBaseURI` resolves the bare names
 next to `MetadataURI` and needs no flag. Changing the flag rewrites the stored locations on the next run.
+
+### Rollout rings
+
+fwupd has a channel mechanism of its own. A host names one or more BKC tags in `HostBkc`, and
+`fwupdmgr sync` moves each device to the release carrying a matching tag, downgrading when it has to.
+Firmirror turns that into rollout rings, for example `dev`, `beta`, `preview` and `stable`: every ring is a
+tag (`firmirror-dev`, `firmirror-beta`, ...), and the metadata it publishes tags each release with the rings
+that serve it. One document and one remote serve every ring. A host joins a ring in
+`/etc/fwupd/fwupd.conf`:
+
+```ini
+[fwupd]
+HostBkc=firmirror-stable
+```
+
+and runs `fwupdmgr refresh && fwupdmgr sync`. Only `sync` follows the tags: `fwupdmgr update` and
+`get-updates` still pick the newest release the remote offers.
+
+**What each ring serves is a YAML file, and the metadata is only generated from it.** It is edited on a
+workstation, reviewed and committed like any other change, and fetched by the refresh:
+
+```yaml
+version: 1
+rings: [dev, beta, preview, stable]   # promotion order: the first takes the newest mirrored release
+tag_prefix: firmirror                 # optional
+components:
+  - id: com.example.nic
+    platform: 3a8f2c91e07b45d6        # a digest of the GUIDs: it tells platforms of one ID apart
+    name: Example NIC                 # for whoever reads the file
+    versions: {dev: "2.90", beta: "2.80", preview: "2.80", stable: "2.80"}
+```
+
+- `firmirror bkc promote dev --bkc.file bkc.yml --metadata <published metadata>` creates the file or moves
+  `dev` on to the newest release of every mirrored component, adding the ones it has no entry for. The
+  metadata is a path or a URL, such as the one the hosts read, or else the storage the command is given.
+  Any other ring takes what the ring before it serves, and only for components that ring serves: promote
+  `beta` after `dev`, `preview` after `beta`, `stable` after `preview`. It prints what it changes and writes
+  the file, which it writes whole: comments in it are not kept. It refuses a promotion that moves a ring
+  backwards unless `--allow-downgrade` says that is the point (`fwupdmgr sync` installs older releases too,
+  so it downgrades the hosts on the ring, which is also how a ring is rolled back), and stops at
+  `--dry-run`. A ring that serves a version the mirror no longer has cannot be placed: leaving it for the
+  newest release is forward, and for any other it counts as backwards, as hosts may still run it.
+  `--component` narrows it to some component IDs. `--prune` also removes the entries of components the
+  mirror no longer has (not together with `--component`), and refuses to remove more than half of the file
+  unless `--allow-mass-prune` says so, as a mirror that is partial or of another environment would.
+  Not promoting a component is how it is held.
+- `firmirror refresh --bkc.file <path or URL>` tags the releases it publishes as the file says. Newer
+  firmware that the file does not name is served by no ring until it is promoted into `dev`. A refresh that
+  cannot read the file fails, as it cannot publish rings without it, and reads it again just before it
+  publishes, so that a promotion committed during a long run is not reverted by the file it started with.
+  When that second read fails, or what it read would be refused as below, the run publishes what it
+  mirrored with the file it started with, which the log says, and exits successfully: the promotion waits
+  for the next refresh, or `regen-metadata`.
+  Without `--bkc.file` it publishes no ring tag at all. It refuses to publish a document that lacks a ring
+  tag the stored one has, as a forgotten or stale file, another tag prefix or a ring removed from the file
+  would take the hosts on that ring off it. A ring still counts when some entry names a version for it,
+  whatever the mirror holds: its hosts then stay where they are. It says so before it mirrors anything, and
+  likewise refuses, before it mirrors anything, to take a signed JCAT off for want of signing keys, as
+  one that cannot be read may be signed: `--force` says that is the point of the tags, and
+  `--stop-signing` of not signing any more. It likewise refuses to take the base URL out of the locations of what is
+  published, as a forgotten `--firmware-base-url` would: `--drop-base-url` says that is the point. The
+  file is a trusted input, as it decides what every host is served: it is read over HTTPS, a plain HTTP
+  URL needs `--bkc.allow-http`, and the URL is shown in the CronJob and the logs, so it should hold no
+  credentials. It is read up to 16 MiB, and a field it does not know is ignored at its top when a URL
+  serves it, as the service can be ahead of this firmirror, and an error anywhere else.
+- `firmirror regen-metadata` publishes the stored document again, whether or not it changed: a refresh
+  leaves an unchanged document alone, and a new signing key does not change it, although new definitions
+  do, so the next refresh publishes those. Run it after the file changes, if the next refresh is too far
+  away, and after switching to a new signing key. It
+  needs the storage, signing, `--firmware-base-url` and `--bkc.file` arguments of the refresh, mirrors
+  nothing, and refuses to publish without `--sign.*` over a JCAT that is signed. As it renders the stored
+  document with only what it is given, it also refuses to take the ring tags or the base URL out of it, as
+  a forgotten argument would, unless `--force` (the tags) or `--drop-base-url` says that is the point, nor stop signing unless `--stop-signing` says so. It goes on after a first signal, as
+  ending between the JCAT and the metadata would leave one that is not the other's, and ends at the second.
+  It fails, and publishes nothing, if
+  the metadata was published while it ran.
+- `firmirror bkc status` shows what each ring serves, from the file.
+
+The Helm chart reads the file from `bkc.url`, and has a suspended CronJob that starts `regen-metadata`, see
+its README.
+
+Things to know:
+
+- "Newest" is the release published last, by release date, not the highest version: vendor versions
+  (`2.90`, `7.30.30.51`, `20.43.2566`, `HPG4`) are not ordered by anything firmirror could rely on. The
+  same goes for what counts as a downgrade. Two releases of the same day are told apart by their timestamp
+  when the vendor gives one (Dell and HPE do), and otherwise by checksum, which is stable but means
+  nothing. A vendor re-issuing older firmware under a newer date would make `promote dev` pick it: look at
+  the table before committing the file. A release with no date, which HPE publishes when neither the
+  package nor the catalog has one, counts as the oldest, so it is the newest only for a component none of
+  whose releases has a date: `promote dev` warns about it, and the file is where it is pinned. As nothing
+  tells which of two releases is newer when one has no date, moving a ring off or onto an undated release
+  counts as a downgrade, and `--allow-downgrade` with `--component` says that is the point.
+- fwupd reads a tag from the *component* and gives it to every release in it, so a component whose
+  releases are served by different rings is published as several components of the same ID and GUIDs,
+  one per set of tags. fwupd merges the releases of every component matching a device.
+- Rings work per component, an ID and its GUIDs. fwupd resolves a device across every component
+  providing its GUID, and `fwupdmgr sync` takes the newest tagged release among them, so a device whose
+  GUID two components provide can be moved by the other one. Several Dell platforms share GUIDs this way.
+- A version the file names that is no longer mirrored leaves its ring serving nothing for that component,
+  which the refresh logs, as it does the components the file has no entry for.
+- Two runs publishing at once can still replace one another's metadata: `concurrencyPolicy: Forbid` does
+  not stop a Job created by hand from a CronJob.
 
 ### Incremental Updates
 
@@ -309,16 +425,22 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 
 ```
 .
-├── cmd/firmirror.go              # CLI entry point
+├── cmd/
+│   ├── firmirror.go              # CLI entry point, flags, shared helpers
+│   ├── refresh.go                # refresh
+│   ├── bkc.go                    # bkc status, bkc promote
+│   └── regen.go                  # regen-metadata
 ├── pkg/
 │   ├── firmirror/                # Core sync logic, storage backends
 │   │   ├── firmirror.go          # FirmirrorSyncer: orchestration, publishing the metadata
 │   │   ├── jcat.go               # Reading the stored JCAT
 │   │   ├── baseurl.go            # Package locations, bare or under --firmware-base-url
+│   │   ├── regen.go              # regen-metadata, reading published metadata
 │   │   ├── vendor.go             # Vendor/Catalog/FirmwareEntry interfaces
 │   │   ├── storage.go            # Storage interface
 │   │   ├── storage_local.go      # Local filesystem storage
 │   │   └── storage_s3.go         # S3 storage backend
+│   ├── bkc/                      # Rollout rings: the definitions file, tagging, promotion
 │   ├── lvfs/                     # LVFS AppStream XML types
 │   ├── vendors/
 │   │   ├── dell/                 # Dell vendor implementation
