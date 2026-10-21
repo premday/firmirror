@@ -41,12 +41,16 @@ type FirmirrorConfig struct {
 	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
-	Force                       bool   // Publish even if that takes ring tags out of the stored document
-	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
-	DropBaseURL                 bool   // Publish locations without the base URL the stored document has, which Force does not allow
+	Force                       bool   // Publish even if that drops ring tags the stored document has (not the base URL or signing)
+	StopSigning                 bool   // Publish without signing keys over a signed JCAT
+	DropBaseURL                 bool   // Publish locations without the base URL the stored document has
 
-	// BKC defines what each rollout ring serves, which the releases are tagged
-	// with. Nil publishes no ring tag.
+	// ReloadBKC reads the definitions again just before publishing, as a run can
+	// take hours. Nil keeps BKC as given.
+	ReloadBKC func(ctx context.Context) (*bkc.File, error)
+
+	// BKC defines what each rollout ring serves, and so the tags of the releases.
+	// Nil publishes no ring tag.
 	BKC *bkc.File
 }
 
@@ -642,6 +646,25 @@ func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
 	return nil
 }
 
+// reloadDefinitions swaps in the rollout ring definitions read again, within
+// bkc.ReadTimeout, and returns the ones it replaced, which are nil when the run
+// had none, and whether it did. When the new ones cannot be read the old ones are
+// kept: publishing the run's work matters more than the promotion it may miss.
+func (f *FirmirrorSyncer) reloadDefinitions(ctx context.Context) (replaced *bkc.File, ok bool) {
+	if f.Config.ReloadBKC == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, bkc.ReadTimeout)
+	defer cancel()
+	fresh, err := f.Config.ReloadBKC(ctx)
+	if err != nil {
+		slog.Warn("Could not read the rollout rings again, publishing with the ones this run started with", "error", err)
+		return nil, false
+	}
+	replaced, f.Config.BKC = f.Config.BKC, fresh
+	return replaced, true
+}
+
 // LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
 func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	stored, err := f.readStored(ctx)
@@ -719,7 +742,22 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		return nil
 	}
 
-	document, supersededLocations := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+	replaced, reloaded := f.reloadDefinitions(ctx)
+	document, supersededLocations, report := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+	// The definitions read again must pass the checks the ones the run started
+	// with did; otherwise those are used.
+	if reloaded {
+		if err := f.checkTags(tagsOf(document)); err != nil {
+			logger.Warn("The rollout rings read again would stop publishing a ring tag, so this run publishes with the ones it started with: run again with --force, or fix them, to publish them",
+				"error", err)
+			f.Config.BKC = replaced
+			document, supersededLocations, report = f.buildDocument(f.Config.CleanupUnreferencedPackages)
+		}
+	}
+	// Report only for the definitions finally used.
+	if report != nil {
+		report.LogTo(slog.With("component", "bkc"))
+	}
 	if !f.Config.CleanupUnreferencedPackages {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
@@ -757,7 +795,7 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 // buildDocument merges what is stored with what this run mirrored and returns the
 // document to publish, sorted by component for a deterministic output, with the
 // releases tagged for the rings the definitions have them serve.
-func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string) {
+func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string, *bkc.Report) {
 	componentMap, supersededLocations := mergeComponents(f.existingMetadata, f.newComponents, replaceSuperseded)
 
 	// Build final components structure (sorted by ID for deterministic output)
@@ -783,11 +821,11 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 		document.Component = append(document.Component, *component)
 	}
 
+	var report *bkc.Report
 	if f.Config.BKC != nil {
-		f.Config.BKC.Apply(document.Component).LogTo(slog.With("component", "bkc"))
+		report = f.Config.BKC.Apply(document.Component)
 	}
-
-	return document, supersededLocations
+	return document, supersededLocations, report
 }
 
 // renderMetadata is the XML a document is published as, its components grouped

@@ -263,12 +263,38 @@ func compressTestDocument(t *testing.T, document string) []byte {
 	return encoder.EncodeAll([]byte(document), nil)
 }
 
+func TestDefinitionsAreReadAgainBeforeThePublish(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	syncer.Config.ReloadBKC = func(context.Context) (*bkc.File, error) { return definitions("10.0", "10.0"), nil }
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("10.0", "a.cab")}
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	assert.Equal(t, []string{"firmirror-beta", "firmirror-dev"}, publishedTags(t, dir)["10.0"], "the promotion committed during the run is not reverted")
+}
+
+func TestDefinitionsThatCannotBeReadAgainAreTheOnesTheRunStartedWith(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	syncer.Config.ReloadBKC = func(context.Context) (*bkc.File, error) { return nil, errors.New("unreachable") }
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("10.0", "a.cab")}
+
+	require.NoError(t, syncer.SaveMetadata(ctx), "the run has done its work")
+
+	assert.Equal(t, []string{"firmirror-dev"}, publishedTags(t, dir)["10.0"])
+}
+
 func TestBuildingTheDocumentLeavesTheMirroredComponentsAlone(t *testing.T) {
 	syncer := newRingsSyncer(t, t.TempDir(), definitions("10.0"))
 	mirrored := versioned("10.0", "a.cab")
 	syncer.newComponents = []lvfs.Component{mirrored}
 
-	syncer.buildDocument(false)
+	_, _, _ = syncer.buildDocument(false)
 
 	assert.Empty(t, mirrored.Releases[0].Tags, "the tags are on the document's releases, not on the ones the run holds")
 }
@@ -305,6 +331,20 @@ func TestPreflightHoldsARemirrorToTheTagsOfWhatItDiscarded(t *testing.T) {
 	assert.ErrorContains(t, syncer.Preflight(ctx), "would no longer be published", "the definitions alone say which tags are published, whatever the re-mirror got to")
 	syncer.Config.Force = true
 	assert.NoError(t, syncer.Preflight(ctx))
+}
+
+func TestDefinitionsReadAgainThatWouldDropATagAreNotUsed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0", "10.0"), versioned("10.0", "a.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("10.0", "10.0"))
+	syncer.Config.ReloadBKC = func(context.Context) (*bkc.File, error) { return bkc.New([]string{"dev", "beta"}), nil }
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("20.0", "b.cab")}
+
+	require.NoError(t, syncer.SaveMetadata(ctx), "the run's work is published, with the definitions that passed the first check")
+
+	assert.Equal(t, []string{"firmirror-beta", "firmirror-dev"}, publishedTags(t, dir)["10.0"])
 }
 
 func TestARingWhoseVersionsTheMirrorLostDoesNotStopThePublish(t *testing.T) {
@@ -416,6 +456,22 @@ func TestADocumentWithNoRingTagAtAllIsRefusedWhenTheStoredHasSome(t *testing.T) 
 
 	assert.NoError(t, syncer.Preflight(ctx), "the rings could publish their tags, which only the built document tells")
 	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "no ring tag at all")
+}
+
+func TestDefinitionsReadAgainThatTagNothingTheMirrorHasAreNotUsed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0", "10.0"), versioned("10.0", "a.cab"))
+	elsewhere := bkc.New([]string{"dev", "beta", "stable"})
+	elsewhere.Components = []bkc.Entry{{ID: "com.other", Versions: map[string]string{"dev": "1", "beta": "1"}}}
+	syncer := newRingsSyncer(t, dir, definitions("10.0", "10.0"))
+	syncer.Config.ReloadBKC = func(context.Context) (*bkc.File, error) { return elsewhere, nil }
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("20.0", "b.cab")}
+
+	require.NoError(t, syncer.SaveMetadata(ctx), "the starting definitions would have published fine")
+
+	assert.Equal(t, []string{"firmirror-beta", "firmirror-dev"}, publishedTags(t, dir)["10.0"])
 }
 
 func TestLocationsAreURLsWhenTheirArtifactsAre(t *testing.T) {
