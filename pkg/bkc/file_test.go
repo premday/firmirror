@@ -464,3 +464,36 @@ func TestServesAndHeldOnlyTellWhatARingHas(t *testing.T) {
 	assert.True(t, file.HeldOnly("beta"), "held entries are all that name it")
 	assert.False(t, file.HeldOnly("stable"), "no entry names it at all")
 }
+
+func TestSameServingIgnoresNamesAndNothingElse(t *testing.T) {
+	file := func(name, version string) *File {
+		f := New([]string{"dev"})
+		f.Components = []Entry{{ID: "a", Name: name, Versions: map[string]string{"dev": version}}}
+		return f
+	}
+
+	assert.True(t, file("One", "1.0").SameServing(file("Another", "1.0")))
+	assert.False(t, file("One", "1.0").Equal(file("Another", "1.0")), "promote writes a changed name")
+	assert.False(t, file("One", "1.0").SameServing(file("One", "2.0")))
+}
+
+func TestLoadWithDigestHashesWhatItRead(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rings.yml")
+	require.NoError(t, os.WriteFile(path, []byte(sample), 0o644))
+
+	_, first, err := LoadWithDigest(ctx, path, false)
+	require.NoError(t, err)
+	_, again, err := LoadWithDigest(ctx, path, false)
+	require.NoError(t, err)
+	assert.Equal(t, first, again)
+
+	require.NoError(t, os.WriteFile(path, []byte(sample+"# edited\n"), 0o644))
+	_, edited, err := LoadWithDigest(ctx, path, false)
+	require.NoError(t, err)
+	assert.NotEqual(t, first, edited, "any change of the bytes is a change")
+
+	require.NoError(t, os.WriteFile(path, []byte("rings: ["), 0o644))
+	_, _, err = LoadWithDigest(ctx, path, false)
+	assert.Error(t, err)
+}
