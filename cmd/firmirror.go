@@ -64,6 +64,22 @@ var args struct {
 		StopSigning bool `help:"Publish without signing keys over a JCAT that is signed, which clients that require signed metadata then reject: to stop signing on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
 		DropBaseURL bool `help:"Publish package locations without the base URL the stored metadata has, as a forgotten --firmware-base-url would, which fwupd remotes that set FirmwareBaseURI reject: to drop it on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
 	} `cmd:"" help:"Refresh all the firmware from the repositories. Note: this will not replace the already-existing firmware, even if the vendor pushed an updated version. You will need to delete the firmware manually."`
+
+	Rollout struct {
+		Status struct {
+			Ring string `help:"Only report this ring." default:""`
+		} `cmd:"" help:"Report which version each rollout ring serves for each component, from --bkc.file."`
+
+		Promote struct {
+			Ring           string   `arg:"" help:"The ring to promote into. The first ring takes the newest release of every mirrored component, any other ring what the ring before it serves."`
+			Component      []string `help:"Only promote these component IDs. Can be repeated. Omit to promote every component."`
+			Metadata       string   `help:"Read the mirrored components from this published metadata, a path or an HTTP(S) URL, instead of from the storage." default:""`
+			DryRun         bool     `help:"Report what would change without writing the file." default:"false"`
+			AllowDowngrade bool     `help:"Allow a promotion that moves the ring backwards. fwupdmgr sync installs older releases too, so this downgrades the hosts on the ring." default:"false"`
+			Prune          bool     `help:"Also remove the entries of components the mirror no longer has. Not with --component." default:"false"`
+			AllowMassPrune bool     `help:"Let --prune remove more than half of the entries of the file, which a mirror that is partial or of another environment would." default:"false"`
+		} `cmd:"" help:"Move a ring on, in the file --bkc.file names, which is created if it does not exist. Nothing is published: the file is committed, and the next refresh or regen-metadata publishes it."`
+	} `cmd:"" name:"bkc" help:"Inspect and promote the rollout rings."`
 }
 
 func main() {
@@ -86,6 +102,10 @@ func run(command string) error {
 	switch command {
 	case "refresh":
 		return runRefresh(ctx, stop)
+	case "bkc status":
+		return runBKCStatus(ctx)
+	case "bkc promote <ring>":
+		return runBKCPromote(ctx)
 	default:
 		panic(command)
 	}
@@ -144,6 +164,47 @@ func openStorage(ctx context.Context) (firmirror.Storage, error) {
 	}
 	slog.Info("Using local filesystem storage", "path", args.OutputDir)
 	return storage, nil
+}
+
+// checkOutputDir fails when the output directory does not exist, so that a
+// command that only reads does not create it.
+func checkOutputDir() error {
+	if !args.S3.Enable && args.OutputDir != "" {
+		if _, err := os.Stat(args.OutputDir); err != nil {
+			return fmt.Errorf("output directory: %w", err)
+		}
+	}
+	return nil
+}
+
+// openSyncer is a syncer on the configured storage with the stored metadata
+// loaded, for a command that mirrors nothing. It uses a temporary cache directory,
+// removed by the returned function, so it does not touch the work directories of a
+// refresh running from the same directory.
+func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirror.FirmirrorSyncer, func(), error) {
+	if err := checkOutputDir(); err != nil {
+		return nil, nil, err
+	}
+	storage, err := openStorage(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	cacheDir, err := os.MkdirTemp("", "firmirror-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { os.RemoveAll(cacheDir) }
+	config.CacheDir = cacheDir
+	syncer, err := firmirror.NewFirmirrorSyncer(config, storage)
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("failed to create syncer: %w", err)
+	}
+	if err := syncer.LoadMetadata(ctx); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("failed to load existing metadata: %w", err)
+	}
+	return syncer, cleanup, nil
 }
 
 // loadDefinitions reads the rollout ring definitions, or returns nil when no
