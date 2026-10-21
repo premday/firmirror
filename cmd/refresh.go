@@ -39,6 +39,7 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		MaxConcurrency:              args.Concurrency,
 		CleanupUnreferencedPackages: args.S3.Cleanup,
 		FirmwareBaseURL:             args.FirmwareBaseURL,
+		StopSigning:                 args.Refresh.StopSigning,
 	}
 
 	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
@@ -59,6 +60,15 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		fm.RegisterVendor("dell", dellVendor)
 	}
 
+	// Load existing metadata to avoid reprocessing
+	if err := fm.LoadMetadata(ctx); err != nil {
+		return fmt.Errorf("failed to load existing metadata: %w", err)
+	}
+	// Fail before downloading anything on what the final publish would refuse.
+	if err := fm.Preflight(ctx); err != nil {
+		return err
+	}
+
 	defer func() {
 		stop()
 		slog.Info("Saving repository metadata")
@@ -67,11 +77,6 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 			runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
 		}
 	}()
-
-	// Load existing metadata to avoid reprocessing
-	if err := fm.LoadMetadata(ctx); err != nil {
-		return fmt.Errorf("failed to load existing metadata: %w", err)
-	}
 
 	slog.Info("Starting firmware processing", "vendors", len(fm.GetAllVendors()))
 	startTime := time.Now()
