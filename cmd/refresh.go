@@ -33,7 +33,7 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		return err
 	}
 
-	storage, err := openStorage(ctx)
+	storage, err := openWritableStorage(ctx)
 	if err != nil {
 		return err
 	}

@@ -189,6 +189,25 @@ func openStorage(ctx context.Context) (firmirror.Storage, error) {
 	return storage, nil
 }
 
+// openWritableStorage is openStorage for a command that writes to the storage,
+// which also removes what a write that was killed left in it.
+func openWritableStorage(ctx context.Context) (firmirror.Storage, error) {
+	storage, err := openStorage(ctx)
+	if err == nil {
+		removeStaleTemporaries(storage)
+	}
+	return storage, err
+}
+
+// removeStaleTemporaries removes what a write that was killed left in a local
+// storage. A process that keeps running calls it again, as it is only what is
+// old that it removes.
+func removeStaleTemporaries(storage firmirror.Storage) {
+	if local, ok := storage.(*firmirror.LocalStorage); ok {
+		local.RemoveStaleTemporaries()
+	}
+}
+
 // checkOutputDir fails when the output directory does not exist, so that a
 // command that only reads does not create it.
 func checkOutputDir() error {
@@ -208,7 +227,7 @@ func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirr
 	if err := checkOutputDir(); err != nil {
 		return nil, nil, err
 	}
-	storage, err := openStorage(ctx)
+	storage, err := openWritableStorage(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

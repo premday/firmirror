@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/premday/firmirror/pkg/utils"
 )
+
+// staleTemporaryAge is how old a temporary file is before no write can be using it.
+const staleTemporaryAge = 24 * time.Hour
 
 // LocalStorage implements Storage interface for local filesystem
 type LocalStorage struct {
@@ -22,6 +27,15 @@ func NewLocalStorage(basePath string) (*LocalStorage, error) {
 		return nil, fmt.Errorf("failed to create base path: %w", err)
 	}
 	return &LocalStorage{basePath: basePath}, nil
+}
+
+// RemoveStaleTemporaries removes the temporary files a write that was killed left
+// in the storage, which nothing else removes. Only the process that writes to the
+// storage calls it, as opening one to read must not change it.
+func (s *LocalStorage) RemoveStaleTemporaries() {
+	if removed := utils.RemoveStaleTemporaries(s.basePath, staleTemporaryAge); removed > 0 {
+		slog.Warn("Removed temporary files left by an interrupted write", "path", s.basePath, "files", removed)
+	}
 }
 
 // Write stores data with the given key to the filesystem
