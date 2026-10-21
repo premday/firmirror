@@ -147,6 +147,23 @@ func TestLocalPathReadsEveryFormOfAFileURL(t *testing.T) {
 	assert.ErrorContains(t, err, "names a host")
 }
 
+func TestWriteFileAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.txt")
+	require.NoError(t, os.WriteFile(path, []byte("old"), 0o600))
+
+	require.NoError(t, WriteFileAtomic(path, 0o644, strings.NewReader("new")))
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "new", string(data))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+	entries, err := os.ReadDir(filepath.Dir(path))
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "no temporary file is left")
+}
+
 func TestRedactedSaysNoCredentialsAndNoToken(t *testing.T) {
 	assert.Equal(t, "https://host/a.yml", Redacted("https://user:pw@host/a.yml?token=x#f"))
 	assert.Equal(t, "dir/a.yml", Redacted("dir/a.yml"))
