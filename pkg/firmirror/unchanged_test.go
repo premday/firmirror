@@ -276,3 +276,65 @@ func fileChecksumOfStored(t *testing.T, dir string) string {
 	require.NoError(t, err)
 	return fileChecksum(data)
 }
+
+func TestSaveMetadataAlwaysPublishWritesAnUnchangedDocument(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := newBaseURLSyncer(t, dir, "")
+	first.newComponents = []lvfs.Component{baseURLTestComponent()}
+	require.NoError(t, first.SaveMetadata(ctx))
+
+	reload := func() (*FirmirrorSyncer, *writeRecorder) {
+		syncer := newBaseURLSyncer(t, dir, "")
+		syncer.Config.AlwaysPublish = true
+		recorder := &writeRecorder{Storage: syncer.Storage}
+		syncer.Storage = recorder
+		require.NoError(t, syncer.LoadMetadata(ctx))
+		return syncer, recorder
+	}
+
+	t.Run("RewritesAndSigns", func(t *testing.T) {
+		syncer, recorder := reload()
+		require.NoError(t, syncer.SaveMetadata(ctx))
+		assert.ElementsMatch(t, []string{"metadata.xml.zst.jcat", "metadata.xml.zst"}, recorder.keys)
+	})
+
+	t.Run("FailsWhenAnotherRunPublishedMeanwhile", func(t *testing.T) {
+		syncer, recorder := reload()
+		other := newBaseURLSyncer(t, dir, "https://mirror.example.com/fwupd")
+		require.NoError(t, other.LoadMetadata(ctx))
+		require.NoError(t, other.SaveMetadata(ctx))
+
+		assert.ErrorContains(t, syncer.SaveMetadata(ctx), "published meanwhile")
+		assert.Empty(t, recorder.keys, "it must not replace what the other run published")
+	})
+}
+
+// blindToMetadata is a storage that cannot tell whether the metadata exists.
+type blindToMetadata struct{ Storage }
+
+func (b blindToMetadata) Exists(ctx context.Context, key string) (bool, error) {
+	if key == metadataKey {
+		return false, errors.New("storage unavailable")
+	}
+	return b.Storage.Exists(ctx, key)
+}
+
+func TestSaveMetadataAlwaysPublishPublishesWhatItMirroredWhateverTheStoreSays(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := newBaseURLSyncer(t, dir, "")
+	first.newComponents = []lvfs.Component{baseURLTestComponent()}
+	require.NoError(t, first.SaveMetadata(ctx))
+
+	syncer := newBaseURLSyncer(t, dir, "")
+	syncer.Config.AlwaysPublish = true
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = blindToMetadata{syncer.Storage}
+	other := baseURLTestComponent()
+	other.ID = "com.test.firmware2"
+	syncer.newComponents = []lvfs.Component{other}
+
+	require.NoError(t, syncer.SaveMetadata(ctx), "a run that mirrored publishes, as one that is not asked to publish always does")
+	assert.Len(t, readSavedMetadata(t, dir).Component, 2)
+}

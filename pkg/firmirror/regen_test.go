@@ -34,6 +34,30 @@ func TestRegenerateMetadataPublishesADocumentThatDidNotChange(t *testing.T) {
 		"a new signing key is no change of the document, and a refresh would leave it alone")
 }
 
+func TestRegenerateMetadataIfChangedLeavesADocumentThatDidNotChangeAlone(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+
+	reload := func(rings *bkc.File) (*FirmirrorSyncer, *writeRecorder) {
+		syncer := newRingsSyncer(t, dir, rings)
+		recorder := &writeRecorder{Storage: syncer.Storage}
+		syncer.Storage = recorder
+		require.NoError(t, syncer.LoadMetadata(ctx))
+		return syncer, recorder
+	}
+
+	syncer, recorder := reload(definitions("10.0"))
+	require.NoError(t, syncer.RegenerateMetadataIfChanged(ctx))
+	assert.Empty(t, recorder.keys, "rendering the same document is no reason to sign it again")
+
+	moved := definitions("10.0")
+	moved.Components[0].Versions["beta"] = "10.0"
+	syncer, recorder = reload(moved)
+	require.NoError(t, syncer.RegenerateMetadataIfChanged(ctx))
+	assert.ElementsMatch(t, []string{"metadata.xml.zst.jcat", "metadata.xml.zst"}, recorder.keys, "new rings change the document")
+}
+
 func TestRegenerateMetadataSignsWithTheKeysItIsGiven(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
