@@ -2,16 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/alecthomas/kong"
 
+	"github.com/premday/firmirror/pkg/bkc"
 	"github.com/premday/firmirror/pkg/firmirror"
+	"github.com/premday/firmirror/pkg/utils"
 )
 
 type DellFlags struct {
@@ -40,27 +44,39 @@ type Signature struct {
 	PrivateKey  string `help:"Path to private key file for signing metadata (.pem or .key)" type:"path"`
 }
 
+type BKC struct {
+	File      string   `help:"What each rollout ring serves: a YAML file, or the HTTP(S) URL it is fetched from. A refresh tags the releases it publishes accordingly, and publishes no ring tag without it. bkc promote edits it, so it is a path there." default:""`
+	AllowHTTP bool     `help:"Read the rollout rings, and the --metadata of bkc promote, from a plain HTTP URL too, which whoever is on the way can change, and which decides what every host is served. Only for a network that is trusted." default:"false"`
+	Rings     []string `help:"The rings of a file bkc promote creates, in promotion order: the first takes the newest mirrored release when it is promoted, and each other ring is promoted from the one before it. A file that exists keeps its own. Default: ${rings}."`
+}
+
 var args struct {
 	DellFlags       `embed:"" prefix:"dell." group:"Dell" help:"Dell firmware fetching."`
 	HPEFlags        `embed:"" prefix:"hpe." group:"HPE" help:"HPE firmware fetching."`
 	S3              `embed:"" prefix:"s3." group:"S3 Storage" help:"S3 storage backend configuration."`
 	Signature       `embed:"" prefix:"sign." group:"Signature" help:"Metadata signing configuration."`
+	BKC             `embed:"" prefix:"bkc." group:"Rollout rings" help:"Rollout ring configuration."`
 	OutputDir       string `help:"Output directory for the LVFS-compatible firmware repository (ignored when using S3)" type:"path"`
 	FirmwareBaseURL string `help:"Public URL the output directory or bucket is served from, as the fwupd remote's FirmwareBaseURI sees it. When set, the metadata names each package by absolute URL under it; without it the names are bare file names, which fwupd rejects with 'failed to parse url' for a remote that sets FirmwareBaseURI." default:""`
 	Concurrency     int    `help:"Maximum number of firmware entries downloaded and processed concurrently per vendor" default:"8"`
 	Refresh         struct {
+		Force       bool `help:"Publish even if that stops publishing a ring tag the stored metadata has, as an absent or stale --bkc.file, another tag prefix or a removed ring would, which takes the hosts on that ring off it. Without it such a refresh fails, before it mirrors anything where it can." default:"false"`
 		StopSigning bool `help:"Publish without signing keys over a JCAT that is signed, which clients that require signed metadata then reject: to stop signing on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
+		DropBaseURL bool `help:"Publish package locations without the base URL the stored metadata has, as a forgotten --firmware-base-url would, which fwupd remotes that set FirmwareBaseURI reject: to drop it on purpose. Without it such a refresh fails, before it mirrors anything." default:"false"`
 	} `cmd:"" help:"Refresh all the firmware from the repositories. Note: this will not replace the already-existing firmware, even if the vendor pushed an updated version. You will need to delete the firmware manually."`
 }
 
 func main() {
-	cli := kong.Parse(&args)
+	cli := kong.Parse(&args, parserVars)
 
 	if err := run(cli.Command()); err != nil {
 		slog.Error("firmirror exited with error", "error", err)
 		os.Exit(1)
 	}
 }
+
+// parserVars are the values the help tags of args refer to.
+var parserVars = kong.Vars{"rings": strings.Join(bkc.DefaultRings, ",")}
 
 func run(command string) error {
 	// Monitor for shutdown signal
@@ -128,4 +144,27 @@ func openStorage(ctx context.Context) (firmirror.Storage, error) {
 	}
 	slog.Info("Using local filesystem storage", "path", args.OutputDir)
 	return storage, nil
+}
+
+// loadDefinitions reads the rollout ring definitions, or returns nil when no
+// file is given.
+func loadDefinitions(ctx context.Context) (*bkc.File, error) {
+	if args.BKC.File == "" {
+		return nil, nil
+	}
+	return loadRings(ctx, args.BKC.File)
+}
+
+// loadRings reads the definitions file, hinting at --bkc.allow-http when plain
+// HTTP is what refused it.
+func loadRings(ctx context.Context, source string) (*bkc.File, error) {
+	file, err := bkc.Load(ctx, source, args.BKC.AllowHTTP)
+	return file, allowHTTPHint(err)
+}
+
+func allowHTTPHint(err error) error {
+	if errors.Is(err, utils.ErrPlainHTTP) {
+		return fmt.Errorf("%w (--bkc.allow-http allows it)", err)
+	}
+	return err
 }
