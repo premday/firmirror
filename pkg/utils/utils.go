@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -359,4 +360,39 @@ func DownloadFileToDest(ctx context.Context, source, file string) error {
 
 	_, err = io.Copy(out, resp)
 	return err
+}
+
+const temporaryPrefix = ".firmirror-tmp-"
+
+// WriteFileAtomic replaces the file at path with data, all or nothing, through a
+// temporary file renamed over it. The data is synced before the rename so a crash
+// leaves the old or the new file, never an empty one.
+func WriteFileAtomic(path string, mode os.FileMode, data io.Reader) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), temporaryPrefix+"*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(temporary.Name())
+	if _, err := io.Copy(temporary, data); err != nil {
+		temporary.Close()
+		return fmt.Errorf("failed to write data: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return fmt.Errorf("failed to flush temp file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	if err := os.Chmod(temporary.Name(), mode); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary.Name(), path); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		dir.Sync()
+		dir.Close()
+	}
+	return nil
 }
