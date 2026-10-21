@@ -34,3 +34,17 @@ func TestPoolByKey(t *testing.T) {
 	assert.Len(t, original[0].Releases, 1)
 	assert.Empty(t, original[0].Releases[:cap(original[0].Releases)][1].Version, "the pieces it was given are not written into")
 }
+
+func TestComponentGUIDs(t *testing.T) {
+	component := Component{Provides: []Firmware{{Text: "b"}, {Text: "a"}, {Text: "b"}}}
+
+	assert.Equal(t, []string{"a", "b"}, ComponentGUIDs(component))
+	assert.Equal(t, "\na,b", ComponentKey(component))
+}
+
+func TestAnEmptyGUIDMakesNoComponentOfItsOwn(t *testing.T) {
+	with := Component{ID: "a", Provides: []Firmware{{Text: ""}, {Text: "g"}}}
+	without := Component{ID: "a", Provides: []Firmware{{Text: "g"}}}
+
+	assert.Equal(t, ComponentKey(without), ComponentKey(with))
+}
