@@ -44,6 +44,7 @@ type FirmirrorConfig struct {
 	Force                       bool   // Publish even if that drops ring tags the stored document has (not the base URL or signing)
 	StopSigning                 bool   // Publish without signing keys over a signed JCAT
 	DropBaseURL                 bool   // Publish locations without the base URL the stored document has
+	AlwaysPublish               bool   // Publish, and sign, even a document identical to the stored one
 
 	// ReloadBKC reads the definitions again just before publishing, as a run can
 	// take hours. Nil keeps BKC as given.
@@ -768,7 +769,7 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
-	outcome, err := f.writeMetadata(ctx, document, false)
+	outcome, err := f.writeMetadata(ctx, document, f.Config.AlwaysPublish)
 	if err != nil {
 		return err
 	}
@@ -782,6 +783,10 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	case metadataUnverified:
 		return errors.New("could not check whether the metadata was published meanwhile, so what this run changed is not published: run it again")
 	case metadataRepublished, metadataUnchecked:
+		if f.Config.AlwaysPublish {
+			// Asked to publish whatever the document, so not publishing is a failure.
+			return errors.New("the metadata could not be published without replacing one that was published meanwhile: run it again")
+		}
 		// Reclaiming against this run's document would delete the other run's packages.
 		return nil
 	}
