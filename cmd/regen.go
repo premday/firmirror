@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-
-	"github.com/premday/firmirror/pkg/firmirror"
 )
 
 func runRegenMetadata(ctx context.Context) error {
@@ -17,14 +15,7 @@ func runRegenMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	config := firmirror.FirmirrorConfig{
-		Certificate:     args.Signature.Certificate,
-		PrivateKey:      args.Signature.PrivateKey,
-		FirmwareBaseURL: args.FirmwareBaseURL,
-		BKC:             definitions,
-	}
-	args.RegenMetadata.apply(&config)
-	syncer, cleanup, err := openSyncer(ctx, config)
+	syncer, cleanup, err := openSyncer(ctx, publishConfig(definitions, args.RegenMetadata.Overrides))
 	if err != nil {
 		return err
 	}
