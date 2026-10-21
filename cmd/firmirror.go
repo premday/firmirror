@@ -236,17 +236,38 @@ func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirr
 		return nil, nil, err
 	}
 	cleanup := func() { os.RemoveAll(cacheDir) }
+	syncer, err := syncerOn(ctx, config, storage, cacheDir)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return syncer, cleanup, nil
+}
+
+// syncerOn is a syncer on the metadata stored in storage, working in cacheDir.
+func syncerOn(ctx context.Context, config firmirror.FirmirrorConfig, storage firmirror.Storage, cacheDir string) (*firmirror.FirmirrorSyncer, error) {
 	config.CacheDir = cacheDir
 	syncer, err := firmirror.NewFirmirrorSyncer(config, storage)
 	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("failed to create syncer: %w", err)
+		return nil, fmt.Errorf("failed to create syncer: %w", err)
 	}
 	if err := syncer.LoadMetadata(ctx); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("failed to load existing metadata: %w", err)
+		return nil, fmt.Errorf("failed to load existing metadata: %w", err)
 	}
-	return syncer, cleanup, nil
+	return syncer, nil
+}
+
+// publishConfig is what a run that publishes needs: the signing keys, the base
+// URL, the rollout rings and the overrides.
+func publishConfig(definitions *bkc.File, overrides Overrides) firmirror.FirmirrorConfig {
+	config := firmirror.FirmirrorConfig{
+		Certificate:     args.Signature.Certificate,
+		PrivateKey:      args.Signature.PrivateKey,
+		FirmwareBaseURL: args.FirmwareBaseURL,
+		BKC:             definitions,
+	}
+	overrides.apply(&config)
+	return config
 }
 
 var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
