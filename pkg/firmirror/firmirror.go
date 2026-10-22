@@ -38,6 +38,7 @@ type FirmirrorConfig struct {
 	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
+	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
 }
 
 type FirmirrorSyncer struct {
@@ -452,6 +453,43 @@ func (f *FirmirrorSyncer) readStored(ctx context.Context) (*storedMetadata, erro
 	return &storedMetadata{components: &components, fingerprint: fingerprintOf(data, compressed)}, nil
 }
 
+// signatureKept refuses to publish without signing keys over a signed JCAT, which
+// clients that require signed metadata would reject. A stored JCAT that is
+// certainly malformed is replaced; one that could not be read may be signed, so
+// that is refused too. StopSigning overrides it, Force does not.
+func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
+	var problem error
+	switch {
+	case f.signing():
+		return nil
+	case errors.Is(readErr, errMalformedJCAT):
+		slog.Warn("The stored JCAT is not one, so it is replaced", "error", readErr)
+	case readErr != nil:
+		problem = fmt.Errorf("could not check whether the stored JCAT is signed, which publishing without signing keys would replace "+
+			"(delete it if it is cut short, and the run will replace it): %w", readErr)
+	case jcat != nil && jcat.isSigned():
+		problem = errors.New("the stored JCAT is signed, and without signing keys it would be replaced by one holding only checksums, " +
+			"which clients that require signed metadata reject: pass --sign.certificate and --sign.private-key, or --stop-signing to stop signing")
+	}
+	if problem != nil && f.Config.StopSigning {
+		slog.Warn("Publishing without signing keys over a signed JCAT, as asked to", "reason", problem)
+		return nil
+	}
+	return problem
+}
+
+// Preflight fails, before anything is mirrored, on what the publish at the end of
+// the run would refuse, which is long after the packages were downloaded and
+// uploaded, to be mirrored again by the next run: no signing keys over a JCAT that
+// is signed. The publish checks it again.
+func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
+	if f.signing() || !f.stored.known() {
+		return nil
+	}
+	jcat, err := f.readStoredJCATWithRetry(ctx)
+	return f.signatureKept(jcat, err)
+}
+
 // LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
 func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	stored, err := f.readStored(ctx)
@@ -622,6 +660,16 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 			return metadataRepublished, nil
 		default:
 			slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
+		}
+	}
+
+	// Publishing without signing keys would replace a signed JCAT with checksums
+	// alone, which clients that require signatures reject. There is no signature to
+	// protect when there is no stored metadata for it to belong to.
+	if f.stored.known() && !f.signing() {
+		jcat, err := f.readStoredJCATWithRetry(ctx)
+		if err := f.signatureKept(jcat, err); err != nil {
+			return metadataWritten, err
 		}
 	}
 

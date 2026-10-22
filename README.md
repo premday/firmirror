@@ -36,6 +36,8 @@ On Debian/Ubuntu:
 sudo apt install fwupd jcat
 ```
 
+Downloads, and the reads of the rollout rings, honour `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`: list a mirror on the local network in `NO_PROXY`.
+
 ## Installation
 
 ### From Source
@@ -160,7 +162,7 @@ To force re-processing of a firmware, delete its CAB file and remove it from the
 
 ### When the metadata is published
 
-The metadata is only written when it has to be. A run that mirrors nothing leaves an identical `metadata.xml.zst` and its JCAT alone: signing again would change the JCAT, which every client compares to decide whether to download the metadata again. It is published again when the JCAT is not the metadata's, as an interrupted write leaves it (the JCAT is written first, the metadata last), or when it holds no signature while signing is configured, so turning signing on takes effect at the next refresh without waiting for new firmware. A signed JCAT is not replaced by a run without signing keys that has nothing else to publish.
+The metadata is only written when it has to be. A run that mirrors nothing leaves an identical `metadata.xml.zst` and its JCAT alone: signing again would change the JCAT, which every client compares to decide whether to download the metadata again. It is published again when the JCAT is not the metadata's, as an interrupted write leaves it (the JCAT is written first, the metadata last), or when it holds no signature while signing is configured, so turning signing on takes effect at the next refresh without waiting for new firmware. A signed JCAT is never replaced by one holding only checksums unless `--stop-signing` says so: a run without signing keys fails before it mirrors anything, as the keys are probably missing.
 
 If another run published meanwhile, a run that mirrors nothing leaves that document alone, and removes no package either. A refresh that cannot save the metadata fails. Do not run two refreshes at once: `concurrencyPolicy: Forbid` does not stop a Job created by hand from the CronJob, and a run that mirrors new firmware still replaces what another run published. Changing the signing key does not sign an unchanged document again, as a signature is only looked for, not checked.
 
@@ -270,7 +272,8 @@ Both vendors publish their repository over rsync as well as over HTTP, as
 a copy can mirror from that copy instead of from the vendor. `--hpe.base-url`
 and `--dell.base-url` take whatever the copy is reachable as: an HTTP(S) URL, a
 `file://` URL, or a plain directory, which is read where it sits with no web
-server in front of it.
+server in front of it. A `file://` URL names the path as `file:///absolute/path`
+or `file:relative/path`; one that names another host is refused.
 
 ```bash
 # Mirror from directories kept up to date with rsync

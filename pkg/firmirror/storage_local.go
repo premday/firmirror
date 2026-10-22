@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/premday/firmirror/pkg/utils"
 )
 
 // LocalStorage implements Storage interface for local filesystem
@@ -30,29 +32,9 @@ func (s *LocalStorage) Write(ctx context.Context, key string, data io.Reader) er
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(filepath.Dir(fullPath), ".firmirror-tmp-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := io.Copy(tmpFile, data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to write data: %w", err)
-	}
-
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename temp file: %w", err)
-	}
-
-	return nil
+	// What is stored is published, and read by whatever serves the directory. A
+	// crash must not leave empty a package or the metadata that refers to it.
+	return utils.WriteFileAtomic(fullPath, 0o644, data)
 }
 
 // Read retrieves data for the given key from the filesystem

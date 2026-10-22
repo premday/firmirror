@@ -34,6 +34,7 @@ type Component struct {
 	Custom            []Custom    `xml:"custom>value,omitempty"`
 	Keywords          []string    `xml:"keywords>keyword,omitempty"`
 	Categories        []string    `xml:"categories>category,omitempty"`
+	Tags              *Tags       `xml:"tags,omitempty"`
 }
 
 type Firmware struct {
@@ -58,6 +59,10 @@ type Release struct {
 	Description     Description `xml:"description"`
 	Issues          []Issue     `xml:"issues>issue,omitempty"`
 	Artifacts       []Artifact  `xml:"artifacts>artifact,omitempty"`
+
+	// Tags are not serialized with the release: fwupd reads them from the
+	// component, so GroupByTags moves them there.
+	Tags []string `xml:"-"`
 }
 
 // Size is a size in bytes of a release: installed is what the firmware takes
