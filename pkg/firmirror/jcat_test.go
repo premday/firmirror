@@ -177,6 +177,23 @@ func TestBytesAfterASignedJCATDoNotMakeItMalformed(t *testing.T) {
 	assert.ErrorContains(t, syncer.Preflight(context.Background()), "signed", "it still holds a signature, which is not replaced")
 }
 
+func TestStopSigningReplacesAJCATThatCannotBeReadEvenForAnUnchangedDocument(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	publishSigned(t, dir)
+	require.NoError(t, os.WriteFile(jcatPath(dir), []byte{0x1f, 0x8b, 0x08}, 0o644))
+	syncer := newBaseURLSyncer(t, dir, "")
+	syncer.Config.StopSigning = true
+	require.NoError(t, syncer.LoadMetadata(ctx))
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	jcat, err := syncer.readStoredJCAT(ctx)
+	require.NoError(t, err, "the unreadable JCAT was asked to be replaced")
+	assert.True(t, jcat.hasChecksum(fileChecksumOfStored(t, dir)))
+}
+
 func TestPreflightRefusesToUnsignAJCAT(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -51,8 +51,11 @@ func (f *FirmirrorSyncer) RegenerateMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if outcome == metadataRepublished {
+	switch outcome {
+	case metadataRepublished:
 		return errors.New("the metadata was published while it was regenerated, which would have replaced it with an older one: run it again")
+	case metadataUnverified:
+		return errors.New("could not check whether the metadata was published while it was regenerated, which would replace it with an older one: run it again")
 	}
 	slog.With("component", "metadata-regen").Info("Metadata regenerated", "components", len(document.Component))
 	return nil
