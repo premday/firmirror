@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"slices"
 	"time"
 
@@ -131,17 +130,12 @@ var jcatRetryDelay = 250 * time.Millisecond
 // decides whether a signature is replaced, at the end of a run whose work is lost
 // if that cannot be known.
 func (f *FirmirrorSyncer) readStoredJCATWithRetry(ctx context.Context) (*storedJCAT, error) {
-	delay := jcatRetryDelay
-	for attempt := 0; ; attempt++ {
-		jcat, err := f.readStoredJCAT(ctx)
-		if err == nil || errors.Is(err, errMalformedJCAT) || errors.Is(err, fs.ErrPermission) || errors.Is(err, context.Canceled) || attempt == 2 {
-			return jcat, err
-		}
-		if sleepErr := utils.Sleep(ctx, delay); sleepErr != nil {
-			return nil, errors.Join(err, sleepErr)
-		}
-		delay *= 2
-	}
+	var jcat *storedJCAT
+	err := retryStorage(ctx, func() (err error) {
+		jcat, err = f.readStoredJCAT(ctx)
+		return err
+	})
+	return jcat, err
 }
 
 // hasBlob reports whether the JCAT holds a blob for which match is true.
@@ -166,40 +160,8 @@ func (j *storedJCAT) hasChecksum(digest string) bool {
 	return j.hasBlob(func(kind int, data string) bool { return kind == jcatKindSHA256 && data == digest })
 }
 
-// jcatState is how the stored JCAT stands against the stored metadata.
-type jcatState int
-
-const (
-	// jcatStale is missing, not the metadata's, or unsigned when signing is
-	// configured.
-	jcatStale jcatState = iota
-	jcatCurrent
-	// jcatRepublished is for the file stored now, not the one this run read:
-	// another run published meanwhile.
-	jcatRepublished
-)
-
-// storedJCATState compares the stored JCAT with the metadata this run read, then
-// with the one stored now.
-func (f *FirmirrorSyncer) storedJCATState(ctx context.Context) (jcatState, error) {
-	jcat, err := f.readStoredJCAT(ctx)
-	if err != nil || jcat == nil {
-		return jcatStale, err
-	}
-	if jcat.hasChecksum(f.stored.file) {
-		if f.signing() && !jcat.isSigned() {
-			return jcatStale, nil
-		}
-		return jcatCurrent, nil
-	}
-
-	compressed, exists, err := f.readStoredFile(ctx)
-	if err != nil || !exists {
-		return jcatStale, err
-	}
-	current := fileChecksum(compressed)
-	if current == f.stored.file || !jcat.hasChecksum(current) {
-		return jcatStale, nil
-	}
-	return jcatRepublished, nil
+// storedJCATCurrent reports whether the stored JCAT is the one of the metadata
+// this run read, and signed when signing is configured.
+func (f *FirmirrorSyncer) storedJCATCurrent(jcat *storedJCAT) bool {
+	return jcat != nil && jcat.hasChecksum(f.stored.file) && (!f.signing() || jcat.isSigned())
 }

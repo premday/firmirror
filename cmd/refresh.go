@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/premday/firmirror/pkg/bkc"
 	"github.com/premday/firmirror/pkg/firmirror"
 	"github.com/premday/firmirror/pkg/vendors/dell"
 	"github.com/premday/firmirror/pkg/vendors/hpe"
@@ -27,6 +28,11 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		return fmt.Errorf("no vendor enabled")
 	}
 
+	definitions, err := loadDefinitions(ctx)
+	if err != nil {
+		return err
+	}
+
 	storage, err := openStorage(ctx)
 	if err != nil {
 		return err
@@ -39,7 +45,13 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 		MaxConcurrency:              args.Concurrency,
 		CleanupUnreferencedPackages: args.S3.Cleanup,
 		FirmwareBaseURL:             args.FirmwareBaseURL,
-		StopSigning:                 args.Refresh.StopSigning,
+		BKC:                         definitions,
+	}
+	args.Refresh.apply(&config)
+	if args.BKC.File != "" {
+		// A promotion committed during a long run must not be reverted by the
+		// file the run started with.
+		config.ReloadBKC = func(ctx context.Context) (*bkc.File, error) { return loadRings(ctx, args.BKC.File) }
 	}
 
 	fm, err := firmirror.NewFirmirrorSyncer(config, storage)
@@ -70,6 +82,10 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 	}
 
 	defer func() {
+		// Ending between the JCAT and the metadata leaves a JCAT that is not the
+		// metadata's, which clients reject, so only a second signal ends the publish.
+		// A signal that already ended the run counts as the first.
+		endOnSecondSignal(ctx, func() {})
 		stop()
 		slog.Info("Saving repository metadata")
 		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {

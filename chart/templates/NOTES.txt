@@ -33,15 +33,24 @@ To check the status of your CronJob:
 
 To view recent jobs:
 
-  kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component!=regen
 
 To manually trigger a job now:
 
   kubectl create job --from=cronjob/{{ include "firmirror.fullname" . }} {{ include "firmirror.fullname" . }}-manual-$(date +%s) -n {{ .Release.Namespace }}
 
+{{- if include "firmirror.regenEnabled" . }}
+
+To publish the metadata again although nothing was mirrored, for example for a new signing key, or for new rollout ring definitions before the next refresh does:
+
+  kubectl create job --from=cronjob/{{ include "firmirror.regenName" . }} {{ include "firmirror.regenName" . }}-$(date +%s) -n {{ .Release.Namespace }}
+
+Do not start it while a refresh is running.
+{{- end }}
+
 To view logs from the latest job:
 
-  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} --tail=100
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component!=regen --tail=100
 
 {{- if .Values.persistence.enabled }}
 

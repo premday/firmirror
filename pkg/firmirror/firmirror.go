@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -22,7 +23,9 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/premday/firmirror/pkg/bkc"
 	"github.com/premday/firmirror/pkg/lvfs"
+	"github.com/premday/firmirror/pkg/utils"
 )
 
 // The published document, and the JCAT clients verify it with.
@@ -38,7 +41,17 @@ type FirmirrorConfig struct {
 	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
-	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
+	Force                       bool   // Publish even if that drops ring tags the stored document has (not the base URL or signing)
+	StopSigning                 bool   // Publish without signing keys over a signed JCAT
+	DropBaseURL                 bool   // Publish locations without the base URL the stored document has
+
+	// ReloadBKC reads the definitions again just before publishing, as a run can
+	// take hours. Nil keeps BKC as given.
+	ReloadBKC func(ctx context.Context) (*bkc.File, error)
+
+	// BKC defines what each rollout ring serves, and so the tags of the releases.
+	// Nil publishes no ring tag.
+	BKC *bkc.File
 }
 
 type FirmirrorSyncer struct {
@@ -49,7 +62,16 @@ type FirmirrorSyncer struct {
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
 	newComponents    []lvfs.Component // Components accumulated during this run
 
+	facts  storedFacts // Of the document in storage, as of the last read or write
 	stored fingerprint // Of the document in storage, as of the last time it was read or written
+}
+
+// storedFacts is what a published document says of itself, read before its
+// pieces are put together again.
+type storedFacts struct {
+	schema   int      // The schema version, 0 when it says none
+	tags     []string // Component tags in the lvfs namespace, sorted
+	absolute bool     // Whether locations are URLs
 }
 
 // fingerprint identifies a published document by the digest of its XML, which a
@@ -77,6 +99,11 @@ func (p fingerprint) known() bool {
 func NewFirmirrorSyncer(config FirmirrorConfig, storage Storage) (*FirmirrorSyncer, error) {
 	if err := validateFirmwareBaseURL(config.FirmwareBaseURL); err != nil {
 		return nil, err
+	}
+	if config.BKC != nil {
+		if err := config.BKC.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid rollout rings: %w", err)
+		}
 	}
 
 	// Create cache directory if it doesn't exist
@@ -393,25 +420,52 @@ func calculateChecksums(filepath string) (sha1Hash, sha256Hash string, err error
 	return sha1Hash, sha256Hash, nil
 }
 
-// readStoredFile reads the published file, compressed. It reports false when
-// storage holds none.
-func (f *FirmirrorSyncer) readStoredFile(ctx context.Context) ([]byte, bool, error) {
-	exists, err := f.Storage.Exists(ctx, metadataKey)
+// checksumStoredFile is the SHA-256 of the published file, read without holding
+// it in memory.
+func checksumStoredFile(ctx context.Context, storage Storage) (string, error) {
+	reader, err := openStoredFile(ctx, storage)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to check metadata existence: %w", err)
+		return "", err
 	}
-	if !exists {
-		return nil, false, nil
-	}
-
-	reader, err := f.Storage.Read(ctx, metadataKey)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to read metadata file: %w", err)
+	if reader == nil {
+		return "", errors.New("the metadata file is gone")
 	}
 	defer reader.Close()
-	compressed, err := io.ReadAll(reader)
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", fmt.Errorf("failed to read metadata file: %w", err)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// openStoredFile opens the published file, compressed. It returns nil when
+// storage holds none.
+func openStoredFile(ctx context.Context, storage Storage) (io.ReadCloser, error) {
+	exists, err := storage.Exists(ctx, metadataKey)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to read compressed metadata file: %w", err)
+		return nil, fmt.Errorf("failed to check metadata existence: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	reader, err := storage.Read(ctx, metadataKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata file: %w", err)
+	}
+	return reader, nil
+}
+
+// readStoredFile reads the published file, compressed. It reports false when
+// storage holds none.
+func readStoredFile(ctx context.Context, storage Storage) ([]byte, bool, error) {
+	reader, err := openStoredFile(ctx, storage)
+	if err != nil || reader == nil {
+		return nil, false, err
+	}
+	defer reader.Close()
+	compressed, err := utils.ReadAllLimited(reader, maxDocumentSize, "the metadata file")
+	if err != nil {
+		return nil, false, err
 	}
 	return compressed, true, nil
 }
@@ -422,35 +476,130 @@ func decompress(compressed []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create zstd reader: %w", err)
 	}
 	defer zstReader.Close()
-	data, err := io.ReadAll(zstReader)
+	data, err := utils.ReadAllLimited(zstReader, maxDocumentSize, "the decompressed metadata")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read metadata file: %w", err)
 	}
 	return data, nil
 }
 
+// maxDocumentSize caps the published file, compressed and decompressed each. The
+// mirror of both vendors is some hundreds of megabytes of XML; the cap only
+// stops what is not a document from filling the memory of a pod.
+const maxDocumentSize int64 = 1 << 30
+
 type storedMetadata struct {
 	components  *lvfs.Components
 	fingerprint fingerprint
+	facts       storedFacts
 }
 
 // readStored reads and parses the published document, or returns nil when
 // storage holds none.
 func (f *FirmirrorSyncer) readStored(ctx context.Context) (*storedMetadata, error) {
-	compressed, exists, err := f.readStoredFile(ctx)
+	compressed, exists, err := readStoredFile(ctx, f.Storage)
 	if err != nil || !exists {
 		return nil, err
 	}
-	data, err := decompress(compressed)
+	return parseStored(compressed)
+}
+
+// parseStored parses the published file, whose components are still the pieces
+// they were published in (see lvfs.GroupByTags), and fingerprints it. The tags
+// are not read back onto the releases: the definitions tag them on every publish.
+func parseStored(compressed []byte) (*storedMetadata, error) {
+	components, data, err := decodeStored(compressed)
 	if err != nil {
 		return nil, err
 	}
+	stored := &storedMetadata{components: components, fingerprint: fingerprintOf(data, compressed), facts: storedFacts{schema: components.SchemaVersion}}
+	tags := make(map[string]struct{})
+	for _, component := range components.Component {
+		if component.Tags != nil {
+			for _, tag := range component.Tags.Tag {
+				if tag.Namespace == lvfs.TagNamespace {
+					tags[tag.Value] = struct{}{}
+				}
+			}
+		}
+		for _, release := range component.Releases {
+			stored.facts.absolute = stored.facts.absolute || isURL(release.Location) ||
+				slices.ContainsFunc(release.Artifacts, func(artifact lvfs.Artifact) bool { return isURL(artifact.Location) })
+		}
+	}
+	stored.facts.tags = slices.Sorted(maps.Keys(tags))
+	return stored, nil
+}
 
+// decodeStored decompresses and parses the published file, and returns the XML
+// too.
+func decodeStored(compressed []byte) (*lvfs.Components, []byte, error) {
+	data, err := decompress(compressed)
+	if err != nil {
+		return nil, nil, err
+	}
 	var components lvfs.Components
 	if err := xml.Unmarshal(data, &components); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata XML: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse metadata XML: %w", err)
 	}
-	return &storedMetadata{components: &components, fingerprint: fingerprintOf(data, compressed)}, nil
+	return &components, data, nil
+}
+
+// untagging refuses to publish without a ring tag the stored document has, as
+// the hosts on that ring would stop matching releases. Force overrides it.
+func (f *FirmirrorSyncer) untagging() error {
+	if f.Config.Force {
+		return nil
+	}
+	possible := f.possibleTags()
+	dropped := slices.DeleteFunc(slices.Clone(f.facts.tags), func(tag string) bool {
+		_, kept := slices.BinarySearch(possible, tag)
+		return kept
+	})
+	if len(dropped) == 0 {
+		return nil
+	}
+	shown := dropped[:min(len(dropped), 5)]
+	return fmt.Errorf("the stored metadata has ring tags that would no longer be published (%s, %d in all), which takes the hosts on those rings off them: "+
+		"check the rollout ring definitions (--bkc.file), or force it if that is the point", strings.Join(shown, ", "), len(dropped))
+}
+
+// noRingTag refuses a built document with no ring tag at all over a stored one
+// that has some: that means definitions for another mirror, not a ring whose
+// versions were lost. A stored document discarded for its schema version is exempt,
+// as the re-mirror is only partly tagged until it finishes. Force overrides it.
+func (f *FirmirrorSyncer) noRingTag(published []string) error {
+	if f.Config.Force || f.existingMetadata == nil || len(f.facts.tags) == 0 || len(published) > 0 {
+		return nil
+	}
+	return errors.New("the document to publish has no ring tag at all, although the stored metadata has some: the definitions name nothing the mirror has, " +
+		"which takes every host off its ring: check the rollout ring definitions (--bkc.file), or force it if that is the point")
+}
+
+// checkTags is what a built document must pass before it is published: no stored
+// ring tag dropped, and some ring tag when the stored document has some.
+func (f *FirmirrorSyncer) checkTags(published []string) error {
+	if err := f.untagging(); err != nil {
+		return err
+	}
+	return f.noRingTag(published)
+}
+
+// possibleTags are the tags the definitions can publish, sorted: those of the
+// rings some entry names a version for. A ring whose versions the mirror lost
+// still counts, as its hosts stay where they are.
+func (f *FirmirrorSyncer) possibleTags() []string {
+	if f.Config.BKC == nil {
+		return nil
+	}
+	var tags []string
+	for _, ring := range f.Config.BKC.Rings {
+		if slices.ContainsFunc(f.Config.BKC.Components, func(entry bkc.Entry) bool { return entry.Versions[ring] != "" }) {
+			tags = append(tags, f.Config.BKC.Tag(ring))
+		}
+	}
+	slices.Sort(tags)
+	return tags
 }
 
 // signatureKept refuses to publish without signing keys over a signed JCAT, which
@@ -478,16 +627,42 @@ func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
 	return problem
 }
 
-// Preflight fails, before anything is mirrored, on what the publish at the end of
-// the run would refuse, which is long after the packages were downloaded and
-// uploaded, to be mirrored again by the next run: no signing keys over a JCAT that
-// is signed. The publish checks it again.
+// Preflight fails, before anything is mirrored, on what the final publish would
+// refuse: a stored ring tag that no ring of the definitions can publish, a
+// dropped base URL, and no signing keys over a signed JCAT. The publish repeats
+// these and also checks that the built document has some ring tag, which only it
+// can tell.
 func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
-	if f.signing() || !f.stored.known() {
-		return nil
+	if err := f.untagging(); err != nil {
+		return err
 	}
-	jcat, err := f.readStoredJCATWithRetry(ctx)
-	return f.signatureKept(jcat, err)
+	if err := f.baseURLDropped(); err != nil {
+		return err
+	}
+	if !f.signing() && f.stored.known() {
+		jcat, err := f.readStoredJCATWithRetry(ctx)
+		return f.signatureKept(jcat, err)
+	}
+	return nil
+}
+
+// reloadDefinitions swaps in the rollout ring definitions read again, within
+// bkc.ReadTimeout, and returns the ones it replaced, which are nil when the run
+// had none, and whether it did. When the new ones cannot be read the old ones are
+// kept: publishing the run's work matters more than the promotion it may miss.
+func (f *FirmirrorSyncer) reloadDefinitions(ctx context.Context) (replaced *bkc.File, ok bool) {
+	if f.Config.ReloadBKC == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, bkc.ReadTimeout)
+	defer cancel()
+	fresh, err := f.Config.ReloadBKC(ctx)
+	if err != nil {
+		slog.Warn("Could not read the rollout rings again, publishing with the ones this run started with", "error", err)
+		return nil, false
+	}
+	replaced, f.Config.BKC = f.Config.BKC, fresh
+	return replaced, true
 }
 
 // LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
@@ -502,6 +677,7 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	}
 	components := stored.components
 	f.stored = stored.fingerprint
+	f.facts = stored.facts
 
 	if components.SchemaVersion != lvfs.MetadataSchemaVersion {
 		// Drop the components too, not just the index: they are built
@@ -535,6 +711,25 @@ func (f *FirmirrorSyncer) LoadMetadata(ctx context.Context) error {
 	return nil
 }
 
+// schemaError says that a document is not of the schema version this firmirror
+// publishes.
+func schemaError(what string, schema int, hint string) error {
+	return fmt.Errorf("%s has schema version %d and this firmirror publishes %d: %s", what, schema, lvfs.MetadataSchemaVersion, hint)
+}
+
+// noMetadata explains why there is no current document, and is nil when there is
+// one.
+func (f *FirmirrorSyncer) noMetadata() error {
+	switch {
+	case f.existingMetadata != nil:
+		return nil
+	case f.stored.known():
+		return schemaError("the stored metadata", f.facts.schema, "run a refresh, which mirrors everything again")
+	default:
+		return errors.New("there is no metadata: run a refresh first")
+	}
+}
+
 // SaveMetadata saves the combined metadata (existing + accumulated) to metadata.xml.zst
 func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
@@ -547,12 +742,27 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 		return nil
 	}
 
-	document, supersededLocations := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+	replaced, reloaded := f.reloadDefinitions(ctx)
+	document, supersededLocations, report := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+	// The definitions read again must pass the checks the ones the run started
+	// with did; otherwise those are used.
+	if reloaded {
+		if err := f.checkTags(tagsOf(document)); err != nil {
+			logger.Warn("The rollout rings read again would stop publishing a ring tag, so this run publishes with the ones it started with: run again with --force, or fix them, to publish them",
+				"error", err)
+			f.Config.BKC = replaced
+			document, supersededLocations, report = f.buildDocument(f.Config.CleanupUnreferencedPackages)
+		}
+	}
+	// Report only for the definitions finally used.
+	if report != nil {
+		report.LogTo(slog.With("component", "bkc"))
+	}
 	if !f.Config.CleanupUnreferencedPackages {
 		logRetainedSupersededPackages(logger, supersededLocations)
 	}
 
-	outcome, err := f.writeMetadata(ctx, document)
+	outcome, err := f.writeMetadata(ctx, document, false)
 	if err != nil {
 		return err
 	}
@@ -563,7 +773,9 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 			"new_components", len(f.newComponents))
 	case metadataUnchanged:
 		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
-	case metadataRepublished:
+	case metadataUnverified:
+		return errors.New("could not check whether the metadata was published meanwhile, so what this run changed is not published: run it again")
+	case metadataRepublished, metadataUnchecked:
 		// Reclaiming against this run's document would delete the other run's packages.
 		return nil
 	}
@@ -581,8 +793,9 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 }
 
 // buildDocument merges what is stored with what this run mirrored and returns the
-// document to publish, sorted by component for a deterministic output.
-func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string) {
+// document to publish, sorted by component for a deterministic output, with the
+// releases tagged for the rings the definitions have them serve.
+func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Components, []string, *bkc.Report) {
 	componentMap, supersededLocations := mergeComponents(f.existingMetadata, f.newComponents, replaceSuperseded)
 
 	// Build final components structure (sorted by ID for deterministic output)
@@ -608,16 +821,108 @@ func (f *FirmirrorSyncer) buildDocument(replaceSuperseded bool) (*lvfs.Component
 		document.Component = append(document.Component, *component)
 	}
 
-	return document, supersededLocations
+	var report *bkc.Report
+	if f.Config.BKC != nil {
+		report = f.Config.BKC.Apply(document.Component)
+	}
+	return document, supersededLocations, report
 }
 
-// renderMetadata is the XML a document is published as.
+// renderMetadata is the XML a document is published as, its components grouped
+// by tag set.
 func (f *FirmirrorSyncer) renderMetadata(document *lvfs.Components) ([]byte, error) {
-	xmlBytes, err := xml.MarshalIndent(rewriteLocations(document, f.publishedLocation), "", "  ")
+	published := rewriteLocations(document, f.publishedLocation)
+	published.Component = lvfs.GroupByTags(published.Component)
+	xmlBytes, err := xml.MarshalIndent(published, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal metadata XML: %w", err)
 	}
 	return append([]byte(xml.Header), xmlBytes...), nil
+}
+
+func tagsOf(document *lvfs.Components) []string {
+	tags := make(map[string]struct{})
+	for _, component := range document.Component {
+		for _, release := range component.Releases {
+			for _, tag := range release.Tags {
+				tags[tag] = struct{}{}
+			}
+		}
+	}
+	return slices.Sorted(maps.Keys(tags))
+}
+
+// retryStorage runs a read of the store that decides whether to publish, again
+// twice if it fails: one failure of a store must not lose a run's work. What
+// another try cannot change is not retried.
+func retryStorage(ctx context.Context, read func() error) error {
+	delay := jcatRetryDelay
+	for attempt := 0; ; attempt++ {
+		err := read()
+		if err == nil || errors.Is(err, errMalformedJCAT) || errors.Is(err, fs.ErrPermission) || errors.Is(err, context.Canceled) || attempt == 2 {
+			return err
+		}
+		if sleepErr := utils.Sleep(ctx, delay); sleepErr != nil {
+			return errors.Join(err, sleepErr)
+		}
+		delay *= 2
+	}
+}
+
+// settled is metadataWritten when the document is to be written, and otherwise
+// why there is nothing to write: another run published since this one read the
+// metadata, or the document is unchanged and its JCAT matches it. An unchanged
+// document with a stale JCAT is written again, as nothing else repairs a write
+// that stopped between the JCAT and the metadata. When the store cannot be checked
+// the outcome is unverified.
+func (f *FirmirrorSyncer) settled(ctx context.Context, jcat *storedJCAT, jcatErr error, unchanged bool) writeOutcome {
+	var exists bool
+	err := retryStorage(ctx, func() (err error) {
+		exists, err = f.Storage.Exists(ctx, metadataKey)
+		return err
+	})
+	if err != nil {
+		slog.Warn("Could not check whether the metadata was published again meanwhile", "error", err)
+		return unverified(unchanged)
+	}
+	if !exists {
+		slog.Warn("The stored metadata is gone, publishing it again")
+		return metadataWritten
+	}
+	// A JCAT holding the checksum of the file this run read shows nothing was
+	// published since, as the JCAT is written before the metadata. Otherwise hash
+	// the stored file.
+	if jcatErr != nil || jcat == nil || !jcat.hasChecksum(f.stored.file) {
+		var current string
+		err := retryStorage(ctx, func() (err error) {
+			current, err = checksumStoredFile(ctx, f.Storage)
+			return err
+		})
+		switch {
+		case err != nil:
+			slog.Warn("Could not check whether the metadata was published again meanwhile", "error", err)
+			return unverified(unchanged)
+		case current != f.stored.file:
+			slog.Warn("The metadata was published again while this run was working, leaving it alone")
+			return metadataRepublished
+		}
+	}
+
+	switch {
+	case jcatErr != nil && unchanged && !f.signing() && !f.Config.StopSigning && !errors.Is(jcatErr, errMalformedJCAT):
+		// The unreadable JCAT may be signed, which a write without keys would
+		// replace: leave it for the next run. With keys, or asked to stop signing,
+		// the write replaces it.
+		slog.Warn("Could not check the stored JCAT, and the metadata is unchanged, so leaving it alone", "error", jcatErr)
+		return metadataUnchecked
+	case jcatErr != nil:
+		slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", jcatErr)
+	case unchanged && f.storedJCATCurrent(jcat):
+		return metadataUnchanged
+	case unchanged:
+		slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
+	}
+	return metadataWritten
 }
 
 // writeOutcome is what writeMetadata did.
@@ -629,46 +934,64 @@ const (
 	metadataUnchanged
 	// metadataRepublished is a store another run published to since this one read it.
 	metadataRepublished
+	// metadataUnchecked is an unchanged document that could not be checked against
+	// the store, which there is nothing to lose by leaving alone.
+	metadataUnchecked
+	// metadataUnverified is a changed document that could not be checked against the
+	// store, so it was not written.
+	metadataUnverified
 )
+
+// unverified is the outcome when the store could not be checked.
+func unverified(unchanged bool) writeOutcome {
+	if unchanged {
+		return metadataUnchecked
+	}
+	return metadataUnverified
+}
 
 // writeMetadata compresses, signs and stores the document, unless it is
 // unchanged or another run published since. The JCAT goes first and the metadata
 // last, as the commit point.
 //
-// A document identical to the stored one is left alone. Signing it again would
-// still change the JCAT, as a PKCS#7 signature carries its signing time, and
+// A document identical to the stored one is left alone, unless republish says to
+// write it anyway, as a new signing key does not change the document. Signing it
+// again changes the JCAT, as a PKCS#7 signature carries its signing time, and
 // every client compares the JCAT to decide whether to download the metadata
 // again.
-func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components) (writeOutcome, error) {
+func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Components, republish bool) (writeOutcome, error) {
 	outBytes, err := f.renderMetadata(document)
 	if err != nil {
 		return metadataWritten, err
 	}
 
 	digest := sha256.Sum256(outBytes)
-	if f.stored.known() && f.stored.document == digest {
-		// A write that stopped between the JCAT and the metadata leaves a JCAT that
-		// is not the metadata's, which clients reject, and nothing else replaces it.
-		state, err := f.storedJCATState(ctx)
-		switch {
-		case err != nil:
-			slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", err)
-		case state == jcatCurrent:
-			return metadataUnchanged, nil
-		case state == jcatRepublished:
-			slog.Warn("The metadata was published again while this run was working, leaving it alone")
-			return metadataRepublished, nil
-		default:
-			slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
+	unchanged := !republish && f.stored.known() && f.stored.document == digest
+
+	// The stored JCAT tells whether the stored metadata is current and whether a
+	// publish without keys would replace a signature.
+	checkState := f.stored.known() && (unchanged || len(f.newComponents) == 0)
+	var jcat *storedJCAT
+	var jcatErr error
+	if checkState || (!f.signing() && f.stored.known()) {
+		jcat, jcatErr = f.readStoredJCATWithRetry(ctx)
+	}
+
+	if checkState {
+		if outcome := f.settled(ctx, jcat, jcatErr, unchanged); outcome != metadataWritten {
+			return outcome, nil
 		}
 	}
 
-	// Publishing without signing keys would replace a signed JCAT with checksums
-	// alone, which clients that require signatures reject. There is no signature to
-	// protect when there is no stored metadata for it to belong to.
-	if f.stored.known() && !f.signing() {
-		jcat, err := f.readStoredJCATWithRetry(ctx)
-		if err := f.signatureKept(jcat, err); err != nil {
+	tags := tagsOf(document)
+	if err := f.checkTags(tags); err != nil {
+		return metadataWritten, err
+	}
+	if err := f.baseURLDropped(); err != nil {
+		return metadataWritten, err
+	}
+	if f.stored.known() {
+		if err := f.signatureKept(jcat, jcatErr); err != nil {
 			return metadataWritten, err
 		}
 	}
@@ -719,6 +1042,7 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	}
 
 	f.stored = fingerprint{document: digest, file: fileChecksum(compressedBuf.Bytes())}
+	f.facts = storedFacts{schema: document.SchemaVersion, tags: tags, absolute: f.Config.FirmwareBaseURL != ""}
 	return metadataWritten, nil
 }
 
@@ -783,6 +1107,9 @@ func mergeComponents(existing *lvfs.Components, incoming []lvfs.Component, repla
 		if existingComponent, ok := componentMap[key]; ok {
 			existingComponent.Releases = append(existingComponent.Releases, component.Releases...)
 		} else {
+			// Building the document tags and sorts the releases in place, and the
+			// run still holds these.
+			component.Releases = slices.Clone(component.Releases)
 			componentMap[key] = &component
 		}
 	}
@@ -859,6 +1186,7 @@ func (f *FirmirrorSyncer) signMetadata(ctx context.Context, sigPath, filePath st
 	jcatTool := func(args []string, wd string) error {
 		slog.Debug("Running jcat-tool", "args", args)
 		cmd := exec.CommandContext(ctx, "jcat-tool", args...)
+		ownProcessGroup(cmd)
 		cmd.Dir = wd
 		output, err := cmd.CombinedOutput()
 		if err != nil {

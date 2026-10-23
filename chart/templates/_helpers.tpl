@@ -67,8 +67,8 @@ Get the image tag
 {{- end }}
 
 {{/*
-The arguments that depend on the environment: where the metadata is stored, how
-it is signed and where it is served from.
+The arguments shared by a refresh and a metadata regeneration: storage, signing,
+base URL and rollout ring definitions.
 */}}
 {{- define "firmirror.commonArgs" -}}
 {{- if .Values.storage.s3.enabled }}
@@ -95,8 +95,15 @@ it is signed and where it is served from.
 - --sign.certificate=/secrets/signing.cert
 - --sign.private-key=/secrets/signing.key
 {{- end }}
+{{- $bkc := .Values.bkc | default dict }}
+{{- if and $bkc.url $bkc.allowHttp }}
+- "--bkc.allow-http"
+{{- end }}
 {{- if .Values.firmwareBaseUrl }}
 - {{ printf "--firmware-base-url=%s" .Values.firmwareBaseUrl | quote }}
+{{- end }}
+{{- if $bkc.url }}
+- {{ printf "--bkc.file=%s" $bkc.url | quote }}
 {{- end }}
 {{- end }}
 
@@ -131,28 +138,57 @@ The arguments of the refresh
 - "refresh"
 {{- include "firmirror.commonArgs" . }}
 {{- include "firmirror.vendorArgs" . }}
+{{- range .Values.extraArgs }}
+- {{ . | quote }}
+{{- end }}
 {{- end }}
 
 {{/*
-The spec of the Job a CronJob creates, called with the root context and the
-arguments of the command to run.
+The arguments of the metadata regeneration.
+*/}}
+{{- define "firmirror.regenArgs" -}}
+- "regen-metadata"
+{{- include "firmirror.commonArgs" . }}
+{{- $regen := (.Values.bkc | default dict).regen | default dict }}
+{{- range $regen.extraArgs }}
+- {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+Whether the regen-metadata CronJob exists: it needs storage that outlives a pod.
+*/}}
+{{- define "firmirror.regenEnabled" -}}
+{{- if or .Values.storage.s3.enabled .Values.persistence.enabled }}true{{ end }}
+{{- end }}
+
+{{/*
+The name of the regen-metadata CronJob. A CronJob name is limited to 52
+characters, so the fullname is truncated to leave room for the suffix.
+*/}}
+{{- define "firmirror.regenName" -}}
+{{- printf "%s-regen-metadata" (include "firmirror.fullname" . | trunc 37 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
+The spec of the Job a CronJob creates, called with the root context (root), the
+command arguments (args), backoffLimit, restartPolicy, the ttl of the finished
+Job (nil for none) and extra pod labels (labels).
 */}}
 {{- define "firmirror.jobSpec" -}}
 {{- $root := .root -}}
-backoffLimit: {{ $root.Values.cronjob.backoffLimit }}
+backoffLimit: {{ .backoffLimit }}
 {{- if $root.Values.cronjob.activeDeadlineSeconds }}
 activeDeadlineSeconds: {{ $root.Values.cronjob.activeDeadlineSeconds }}
 {{- end }}
-{{- if $root.Values.cronjob.ttlSecondsAfterFinished }}
-ttlSecondsAfterFinished: {{ $root.Values.cronjob.ttlSecondsAfterFinished }}
+{{- if not (kindIs "invalid" .ttl) }}
+ttlSecondsAfterFinished: {{ .ttl | int64 }}
 {{- end }}
 template:
   metadata:
     labels:
-      {{- include "firmirror.selectorLabels" $root | nindent 6 }}
-      {{- with $root.Values.podLabels }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
+      {{- /* The labels the selectors use win over podLabels, which would otherwise repeat a key. */}}
+      {{- merge (include "firmirror.selectorLabels" $root | fromYaml) (default (dict) .labels) (default (dict) $root.Values.podLabels) | toYaml | nindent 6 }}
     {{- with $root.Values.podAnnotations }}
     annotations:
       {{- toYaml . | nindent 6 }}
@@ -165,7 +201,7 @@ template:
     serviceAccountName: {{ include "firmirror.serviceAccountName" $root }}
     securityContext:
       {{- toYaml $root.Values.podSecurityContext | nindent 6 }}
-    restartPolicy: {{ $root.Values.cronjob.restartPolicy }}
+    restartPolicy: {{ .restartPolicy }}
     {{- if $root.Values.cronjob.terminationGracePeriodSeconds }}
     terminationGracePeriodSeconds: {{ $root.Values.cronjob.terminationGracePeriodSeconds }}
     {{- end }}
