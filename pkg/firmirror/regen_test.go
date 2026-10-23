@@ -2,7 +2,9 @@ package firmirror
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -65,6 +67,38 @@ func TestARingTheDefinitionsNameNoVersionForCannotBePublishedAndIsRefused(t *tes
 
 	assert.ErrorContains(t, syncer.Preflight(ctx), "no longer be published")
 	assert.ErrorContains(t, syncer.RegenerateMetadata(ctx), "no longer be published")
+}
+
+// blipOnMetadata is a storage that cannot tell whether the metadata exists the
+// first times it is asked.
+type blipOnMetadata struct {
+	Storage
+	failures int
+}
+
+func (b *blipOnMetadata) Exists(ctx context.Context, key string) (bool, error) {
+	if key == metadataKey && b.failures > 0 {
+		b.failures--
+		return false, errors.New("storage unavailable")
+	}
+	return b.Storage.Exists(ctx, key)
+}
+
+func TestARegenerationSurvivesAStorageThatBlipsWhileItChecksForAnotherPublisher(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = &blipOnMetadata{Storage: syncer.Storage, failures: 2}
+	assert.NoError(t, syncer.RegenerateMetadata(ctx), "twice again is what it tries")
+
+	syncer = newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = &blipOnMetadata{Storage: syncer.Storage, failures: 3}
+	assert.ErrorContains(t, syncer.RegenerateMetadata(ctx), "could not check whether the metadata was published")
 }
 
 func TestRegenerateMetadataNeedsMetadata(t *testing.T) {
@@ -312,6 +346,64 @@ func TestReadMetadataSaysNoTokenOfTheURLItFailedOn(t *testing.T) {
 	assert.NotContains(t, err.Error(), "SECRET")
 }
 
+func TestAnUnchangedDocumentWhoseJCATCannotBeReadIsLeftAlone(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = failingJCAT{syncer.Storage}
+
+	assert.NoError(t, syncer.SaveMetadata(ctx), "nothing changed, and what could not be read may be a signature")
+}
+
+func TestAnUnchangedDocumentWithAnEmptyJCATGetsItsJCATBack(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	jcatPath := filepath.Join(dir, "metadata.xml.zst.jcat")
+	require.NoError(t, os.WriteFile(jcatPath, nil, 0o644))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	info, err := os.Stat(jcatPath)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Size(), "clients that verify the JCAT reject the remote until it is replaced")
+}
+
+func TestAnUnchangedDocumentThatCannotBeCheckedDoesNotCleanUp(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	recorder := &deleteRecorder{Storage: failingJCAT{syncer.Storage}}
+	syncer.Storage = recorder
+	syncer.Config.CleanupUnreferencedPackages = true
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	assert.Zero(t, recorder.listed, "another run may have published packages this document does not name")
+}
+
+// deleteRecorder is a storage that can clean up, and counts the listings a
+// cleanup starts with.
+type deleteRecorder struct {
+	Storage
+	listed int
+}
+
+func (d *deleteRecorder) List(context.Context, string) ([]string, error) {
+	d.listed++
+	return nil, nil
+}
+
+func (d *deleteRecorder) Delete(context.Context, string) error { return nil }
+
 func TestADocumentWithNoRingTagAtAllIsRefusedWhenTheStoredHasSome(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -352,4 +444,119 @@ func TestARefreshWithoutTheBaseURLItWasPublishedWithIsRefused(t *testing.T) {
 	assert.ErrorContains(t, forgetful.SaveMetadata(ctx), "base URL", "forcing a tag out does not also drop the base URL")
 	forgetful.Config.DropBaseURL = true
 	assert.NoError(t, forgetful.SaveMetadata(ctx))
+}
+
+func TestRegenerateMetadataDoesNotNeedTheJCATToKnowItWasOvertaken(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	regen := newRingsSyncer(t, dir, definitions("10.0"))
+	signing := func(f *FirmirrorSyncer) {
+		f.Config.Certificate, f.Config.PrivateKey = "/secrets/signing.cert", "/secrets/signing.key"
+	}
+	signing(regen)
+	require.NoError(t, regen.LoadMetadata(ctx))
+
+	refresh(t, dir, definitions("10.0"), versioned("20.0", "b.cab"))
+	require.NoError(t, os.Remove(filepath.Join(dir, "metadata.xml.zst.jcat")))
+
+	assert.ErrorContains(t, regen.RegenerateMetadata(ctx), "run it again", "the stored file is not the one that was read, whatever the JCAT says")
+	assert.Len(t, publishedTags(t, dir), 2)
+}
+
+func TestRegenerateMetadataSaysWhenItCannotTellWhetherItWasOvertaken(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	regen := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, regen.LoadMetadata(ctx))
+	regen.Storage = failingMetadata{regen.Storage}
+
+	assert.ErrorContains(t, regen.RegenerateMetadata(ctx), "could not check whether the metadata was published")
+}
+
+func TestAChangedDocumentThatCannotBeCheckedIsNotReportedAsPublished(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	refresh(t, dir, definitions("10.0"), versioned("20.0", "b.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("20.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = failingMetadata{syncer.Storage}
+
+	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "run it again", "a promotion that was not published must fail the run, not pass for a success")
+}
+
+// failingMetadata is a storage whose metadata cannot be found out about.
+type failingMetadata struct{ Storage }
+
+func (f failingMetadata) Exists(ctx context.Context, key string) (bool, error) {
+	if key == metadataKey {
+		return false, errors.New("storage unavailable")
+	}
+	return f.Storage.Exists(ctx, key)
+}
+
+// unreadableMetadata is a storage whose metadata exists but cannot be read.
+type unreadableMetadata struct{ Storage }
+
+func (u unreadableMetadata) Read(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == metadataKey {
+		return nil, errors.New("storage unavailable")
+	}
+	return u.Storage.Read(ctx, key)
+}
+
+func TestAnUnchangedDocumentThatCannotBeHashedIsLeftAlone(t *testing.T) {
+	quickJCATRetries(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	require.NoError(t, os.Remove(filepath.Join(dir, "metadata.xml.zst.jcat")))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.Storage = unreadableMetadata{syncer.Storage}
+
+	assert.NoError(t, syncer.SaveMetadata(ctx), "nothing changed, so there is nothing a retry would publish")
+}
+
+func TestAnUnchangedDocumentWhoseMetadataIsGoneIsPublishedAgain(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	require.NoError(t, os.Remove(filepath.Join(dir, "metadata.xml.zst")))
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	assert.FileExists(t, filepath.Join(dir, "metadata.xml.zst"))
+}
+
+func TestAJCATOfThePublishedFileSavesReadingItAgain(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+	syncer := newRingsSyncer(t, dir, definitions("10.0"))
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	counter := &readCounter{Storage: syncer.Storage}
+	syncer.Storage = counter
+
+	require.NoError(t, syncer.SaveMetadata(ctx))
+
+	assert.Zero(t, counter.metadata, "the JCAT says the file is the one that was read")
+}
+
+// readCounter counts the reads of the metadata.
+type readCounter struct {
+	Storage
+	metadata int
+}
+
+func (r *readCounter) Read(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == metadataKey {
+		r.metadata++
+	}
+	return r.Storage.Read(ctx, key)
 }
