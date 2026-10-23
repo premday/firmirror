@@ -213,6 +213,20 @@ func publishedMeanwhile(t *testing.T, dir string, configure func(*FirmirrorSynce
 	return slow
 }
 
+func TestSaveMetadataLeavesAlonePublishedMeanwhileEvenWhenItsDocumentDiffers(t *testing.T) {
+	dir := t.TempDir()
+	var recorder *writeRecorder
+	slow := publishedMeanwhile(t, dir, func(s *FirmirrorSyncer) {
+		s.Config.FirmwareBaseURL = "https://mirror.example.com/fwupd"
+		recorder = &writeRecorder{Storage: s.Storage}
+		s.Storage = recorder
+	})
+
+	require.NoError(t, slow.SaveMetadata(context.Background()))
+	assert.Empty(t, recorder.keys, "a run that mirrored nothing does not replace what another run published, whatever it would render")
+	assert.Len(t, readSavedMetadata(t, dir).Component, 2)
+}
+
 func TestSaveMetadataDoesNotReclaimThePackagesOfARunPublishedMeanwhile(t *testing.T) {
 	dir := t.TempDir()
 	slow := publishedMeanwhile(t, dir, func(s *FirmirrorSyncer) {

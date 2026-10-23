@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -40,8 +41,8 @@ type FirmirrorConfig struct {
 	MaxConcurrency              int    // Maximum number of firmware entries processed concurrently (default 1)
 	CleanupUnreferencedPackages bool   // Replace rebuilt metadata releases and delete unreferenced stored CAB packages
 	FirmwareBaseURL             string // Public URL the packages are served from; locations are published as absolute URLs under it
-	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
 	Force                       bool   // Publish even if that takes ring tags out of the stored document
+	StopSigning                 bool   // Publish without signing keys over a JCAT that is signed, to stop signing on purpose
 	DropBaseURL                 bool   // Publish locations without the base URL the stored document has, which Force does not allow
 
 	// BKC defines what each rollout ring serves, which the releases are tagged
@@ -415,20 +416,47 @@ func calculateChecksums(filepath string) (sha1Hash, sha256Hash string, err error
 	return sha1Hash, sha256Hash, nil
 }
 
+// checksumStoredFile is the SHA-256 of the published file, read without holding
+// it in memory.
+func checksumStoredFile(ctx context.Context, storage Storage) (string, error) {
+	reader, err := openStoredFile(ctx, storage)
+	if err != nil {
+		return "", err
+	}
+	if reader == nil {
+		return "", errors.New("the metadata file is gone")
+	}
+	defer reader.Close()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", fmt.Errorf("failed to read metadata file: %w", err)
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// openStoredFile opens the published file, compressed. It returns nil when
+// storage holds none.
+func openStoredFile(ctx context.Context, storage Storage) (io.ReadCloser, error) {
+	exists, err := storage.Exists(ctx, metadataKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check metadata existence: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	reader, err := storage.Read(ctx, metadataKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata file: %w", err)
+	}
+	return reader, nil
+}
+
 // readStoredFile reads the published file, compressed. It reports false when
 // storage holds none.
 func readStoredFile(ctx context.Context, storage Storage) ([]byte, bool, error) {
-	exists, err := storage.Exists(ctx, metadataKey)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to check metadata existence: %w", err)
-	}
-	if !exists {
-		return nil, false, nil
-	}
-
-	reader, err := storage.Read(ctx, metadataKey)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to read metadata file: %w", err)
+	reader, err := openStoredFile(ctx, storage)
+	if err != nil || reader == nil {
+		return nil, false, err
 	}
 	defer reader.Close()
 	compressed, err := utils.ReadAllLimited(reader, maxDocumentSize, "the metadata file")
@@ -595,15 +623,11 @@ func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
 	return problem
 }
 
-// Preflight fails, before anything is mirrored, on what the publish at the end of
-// the run would refuse, which is long after the packages were downloaded and
-// uploaded, to be mirrored again by the next run: a stored ring tag that no ring
-// of the definitions could publish, which is every one when they are not given,
-// the base URL of the stored locations when none is given, and no signing keys
-// over a JCAT that is signed. The publish checks them again, and also that the
-// document built has some ring tag at all, which only it can tell. A ring whose
-// versions the mirror lost can still publish its tag, and its hosts stay where
-// they are, so what the built document tags is not otherwise held to it.
+// Preflight fails, before anything is mirrored, on what the final publish would
+// refuse: a stored ring tag that no ring of the definitions can publish, a
+// dropped base URL, and no signing keys over a signed JCAT. The publish repeats
+// these and also checks that the built document has some ring tag, which only it
+// can tell.
 func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
 	if err := f.untagging(); err != nil {
 		return err
@@ -611,11 +635,11 @@ func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
 	if err := f.baseURLDropped(); err != nil {
 		return err
 	}
-	if f.signing() || !f.stored.known() {
-		return nil
+	if !f.signing() && f.stored.known() {
+		jcat, err := f.readStoredJCATWithRetry(ctx)
+		return f.signatureKept(jcat, err)
 	}
-	jcat, err := f.readStoredJCATWithRetry(ctx)
-	return f.signatureKept(jcat, err)
+	return nil
 }
 
 // LoadMetadata loads existing metadata.xml.zst and builds an index of existing firmware
@@ -711,7 +735,9 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 			"new_components", len(f.newComponents))
 	case metadataUnchanged:
 		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
-	case metadataRepublished:
+	case metadataUnverified:
+		return errors.New("could not check whether the metadata was published meanwhile, so what this run changed is not published: run it again")
+	case metadataRepublished, metadataUnchecked:
 		// Reclaiming against this run's document would delete the other run's packages.
 		return nil
 	}
@@ -788,31 +814,77 @@ func tagsOf(document *lvfs.Components) []string {
 	return slices.Sorted(maps.Keys(tags))
 }
 
-// settled decides, from what the stored JCAT says of the stored metadata, whether
-// there is nothing to write: the document is unchanged and its JCAT is current, or
-// the metadata was published by another run since this one read it. A write that
-// stopped between the JCAT and the metadata leaves a JCAT that is not the
-// metadata's, which clients reject, and nothing else replaces it.
-func (f *FirmirrorSyncer) settled(ctx context.Context, jcat *storedJCAT, jcatErr error, unchanged bool) (writeOutcome, bool) {
-	state, err := f.storedJCATState(ctx, jcat, jcatErr)
+// retryStorage runs a read of the store that decides whether to publish, again
+// twice if it fails: one failure of a store must not lose a run's work. What
+// another try cannot change is not retried.
+func retryStorage(ctx context.Context, read func() error) error {
+	delay := jcatRetryDelay
+	for attempt := 0; ; attempt++ {
+		err := read()
+		if err == nil || errors.Is(err, errMalformedJCAT) || errors.Is(err, fs.ErrPermission) || errors.Is(err, context.Canceled) || attempt == 2 {
+			return err
+		}
+		if sleepErr := utils.Sleep(ctx, delay); sleepErr != nil {
+			return errors.Join(err, sleepErr)
+		}
+		delay *= 2
+	}
+}
+
+// settled is metadataWritten when the document is to be written, and otherwise
+// why there is nothing to write: another run published since this one read the
+// metadata, or the document is unchanged and its JCAT matches it. An unchanged
+// document with a stale JCAT is written again, as nothing else repairs a write
+// that stopped between the JCAT and the metadata. When the store cannot be checked
+// the outcome is unverified.
+func (f *FirmirrorSyncer) settled(ctx context.Context, jcat *storedJCAT, jcatErr error, unchanged bool) writeOutcome {
+	var exists bool
+	err := retryStorage(ctx, func() (err error) {
+		exists, err = f.Storage.Exists(ctx, metadataKey)
+		return err
+	})
+	if err != nil {
+		slog.Warn("Could not check whether the metadata was published again meanwhile", "error", err)
+		return unverified(unchanged)
+	}
+	if !exists {
+		slog.Warn("The stored metadata is gone, publishing it again")
+		return metadataWritten
+	}
+	// A JCAT holding the checksum of the file this run read shows nothing was
+	// published since, as the JCAT is written before the metadata. Otherwise hash
+	// the stored file.
+	if jcatErr != nil || jcat == nil || !jcat.hasChecksum(f.stored.file) {
+		var current string
+		err := retryStorage(ctx, func() (err error) {
+			current, err = checksumStoredFile(ctx, f.Storage)
+			return err
+		})
+		switch {
+		case err != nil:
+			slog.Warn("Could not check whether the metadata was published again meanwhile", "error", err)
+			return unverified(unchanged)
+		case current != f.stored.file:
+			slog.Warn("The metadata was published again while this run was working, leaving it alone")
+			return metadataRepublished
+		}
+	}
+
 	switch {
-	case err != nil && unchanged && !f.signing():
-		// Nothing changed, and what cannot be read may be a signature that a write
-		// without keys would replace: leaving it alone is the safe thing, and the next
-		// run looks again. With keys, the write puts a signature back.
-		slog.Warn("Could not check the stored JCAT, and the metadata is unchanged, so leaving it alone", "error", err)
-		return metadataUnchanged, true
-	case err != nil:
-		slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", err)
-	case state == jcatRepublished:
-		slog.Warn("The metadata was published again while this run was working, leaving it alone")
-		return metadataRepublished, true
-	case unchanged && state == jcatCurrent:
-		return metadataUnchanged, true
+	case jcatErr != nil && unchanged && !f.signing() && !f.Config.StopSigning && !errors.Is(jcatErr, errMalformedJCAT):
+		// The unreadable JCAT may be signed, which a write without keys would
+		// replace: leave it for the next run. With keys, or asked to stop signing,
+		// the write replaces it.
+		slog.Warn("Could not check the stored JCAT, and the metadata is unchanged, so leaving it alone", "error", jcatErr)
+		return metadataUnchecked
+	case jcatErr != nil:
+		slog.Warn("Could not check the stored JCAT, publishing the metadata again", "error", jcatErr)
+	case unchanged && f.storedJCATCurrent(jcat):
+		return metadataUnchanged
 	case unchanged:
 		slog.Warn("The stored JCAT does not match the stored metadata, publishing it again")
 	}
-	return metadataWritten, false
+	return metadataWritten
 }
 
 // writeOutcome is what writeMetadata did.
@@ -824,7 +896,21 @@ const (
 	metadataUnchanged
 	// metadataRepublished is a store another run published to since this one read it.
 	metadataRepublished
+	// metadataUnchecked is an unchanged document that could not be checked against
+	// the store, which there is nothing to lose by leaving alone.
+	metadataUnchecked
+	// metadataUnverified is a changed document that could not be checked against the
+	// store, so it was not written.
+	metadataUnverified
 )
+
+// unverified is the outcome when the store could not be checked.
+func unverified(unchanged bool) writeOutcome {
+	if unchanged {
+		return metadataUnchecked
+	}
+	return metadataUnverified
+}
 
 // writeMetadata compresses, signs and stores the document, unless it is
 // unchanged or another run published since. The JCAT goes first and the metadata
@@ -844,9 +930,17 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	digest := sha256.Sum256(outBytes)
 	unchanged := !republish && f.stored.known() && f.stored.document == digest
 
-	if f.stored.known() && (unchanged || republish) {
-		jcat, jcatErr := f.readStoredJCAT(ctx)
-		if outcome, done := f.settled(ctx, jcat, jcatErr, unchanged); done {
+	// The stored JCAT tells whether the stored metadata is current and whether a
+	// publish without keys would replace a signature.
+	checkState := f.stored.known() && (unchanged || len(f.newComponents) == 0)
+	var jcat *storedJCAT
+	var jcatErr error
+	if checkState || (!f.signing() && f.stored.known()) {
+		jcat, jcatErr = f.readStoredJCATWithRetry(ctx)
+	}
+
+	if checkState {
+		if outcome := f.settled(ctx, jcat, jcatErr, unchanged); outcome != metadataWritten {
 			return outcome, nil
 		}
 	}
@@ -858,13 +952,8 @@ func (f *FirmirrorSyncer) writeMetadata(ctx context.Context, document *lvfs.Comp
 	if err := f.baseURLDropped(); err != nil {
 		return metadataWritten, err
 	}
-
-	// Publishing without signing keys would replace a signed JCAT with checksums
-	// alone, which clients that require signatures reject. There is no signature to
-	// protect when there is no stored metadata for it to belong to.
-	if f.stored.known() && !f.signing() {
-		jcat, err := f.readStoredJCATWithRetry(ctx)
-		if err := f.signatureKept(jcat, err); err != nil {
+	if f.stored.known() {
+		if err := f.signatureKept(jcat, jcatErr); err != nil {
 			return metadataWritten, err
 		}
 	}
