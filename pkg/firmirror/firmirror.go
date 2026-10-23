@@ -1148,6 +1148,7 @@ func (f *FirmirrorSyncer) signMetadata(ctx context.Context, sigPath, filePath st
 	jcatTool := func(args []string, wd string) error {
 		slog.Debug("Running jcat-tool", "args", args)
 		cmd := exec.CommandContext(ctx, "jcat-tool", args...)
+		ownProcessGroup(cmd)
 		cmd.Dir = wd
 		output, err := cmd.CombinedOutput()
 		if err != nil {
