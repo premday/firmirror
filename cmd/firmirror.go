@@ -87,7 +87,7 @@ var args struct {
 
 		Promote struct {
 			Ring           string   `arg:"" help:"The ring to promote into. The first ring takes the newest release of every mirrored component, any other ring what the ring before it serves."`
-			Component      []string `help:"Only promote these component IDs. Can be repeated. Omit to promote every component."`
+			Component      []string `help:"Only promote these component IDs. Can be repeated. Omit to promote every component, but the held ones."`
 			Metadata       string   `help:"Read the mirrored components from this published metadata, a path or an HTTP(S) URL, instead of from the storage." default:""`
 			DryRun         bool     `help:"Report what would change without writing the file." default:"false"`
 			AllowDowngrade bool     `help:"Allow a promotion that moves the ring backwards. fwupdmgr sync installs older releases too, so this downgrades the hosts on the ring." default:"false"`

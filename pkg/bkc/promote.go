@@ -84,9 +84,13 @@ func undated(release lvfs.Release) bool {
 // takes the newest release of every mirrored component, adding entries as needed.
 // Any other ring takes what the ring before it serves; a version the mirror lost
 // is skipped with a warning. An entry without a platform is given the one of the
-// mirrored component of its ID, when there is only one. components are the whole
-// mirrored ones (see lvfs.PoolByKey); only, when set, narrows the promotion to
-// those component IDs, which must all be mirrored.
+// mirrored component of its ID, when there is only one. A held entry is left as
+// it is, and so are the components of its ID that have no entry when it has no
+// platform: none is promoted, nor given an entry. An entry made under an ID that
+// has a held entry is warned of, as it may be the package that was held with
+// another platform. components are the whole mirrored ones (see lvfs.PoolByKey);
+// only, when set, narrows the promotion to those component IDs, which must all
+// be mirrored.
 func (f *File) Promote(components []lvfs.Component, ring string, only []string) (*File, []Change, error) {
 	upstream, err := f.Upstream(ring)
 	if err != nil {
@@ -104,11 +108,20 @@ func (f *File) Promote(components []lvfs.Component, ring string, only []string) 
 		index[entry.Key()] = i
 	}
 	bare := newBareEntries(promoted.Components, components)
+	heldIDs, underHeld := f.heldIDs()
+	var added []Entry // the entries made under an ID that has a held entry
+	noteAdded := func(component lvfs.Component, platform string) {
+		if _, under := underHeld[component.ID]; under {
+			added = append(added, Entry{ID: component.ID, Platform: platform, Name: OneLine(component.Name)})
+		}
+	}
 	var dates undatedNotes
 
 	var unversioned []string
 	var lost []Gap
 	var changes []Change
+	var held []string
+	var heldByID []string // the components held through their ID, whole, by ID and platform
 	for _, component := range components {
 		if len(only) > 0 && !slices.Contains(only, component.ID) {
 			continue
@@ -124,7 +137,16 @@ func (f *File) Promote(components []lvfs.Component, ring string, only []string) 
 			if ok {
 				promoted.Components[adopted].Platform = platform
 				index[key], at, known = adopted, adopted, true
+				noteAdded(component, platform)
 			}
+		}
+		_, heldID := heldIDs[component.ID]
+		if (known && promoted.Components[at].Hold) || (!known && heldID) {
+			held = append(held, component.ID)
+			if !known {
+				heldByID = append(heldByID, component.ID+" "+platform)
+			}
+			continue
 		}
 
 		target := ""
@@ -151,6 +173,7 @@ func (f *File) Promote(components []lvfs.Component, ring string, only []string) 
 			at = len(promoted.Components)
 			index[key] = at
 			promoted.Components = append(promoted.Components, Entry{ID: component.ID, Platform: platform})
+			noteAdded(component, platform)
 		}
 		entry := &promoted.Components[at]
 		if entry.Versions == nil {
@@ -171,6 +194,21 @@ func (f *File) Promote(components []lvfs.Component, ring string, only []string) 
 		})
 	}
 	dates.warn()
+	logLimited(slog.Default(), added, len(added), "Entries were made or completed under an ID that has a held entry: hold them too if they are the package that was held, which its platform may have changed", func(entry Entry) []any {
+		return []any{"id", entry.ID, "platform", entry.Platform, "name", entry.Name}
+	})
+	if len(held) > 0 {
+		attrs := []any{"components", len(held)}
+		if len(heldByID) > 0 {
+			attrs = append(attrs, "first_with_no_entry", heldByID[:min(len(heldByID), 5)])
+		}
+		slog.Info("Held components are left as they are", attrs...)
+		if len(only) > 0 {
+			// Only the components named were looked at, so these are those.
+			slices.Sort(held)
+			slog.Warn("Some components of the IDs named are held, so they are not promoted: take the hold off their entry to promote them", "ids", slices.Compact(held))
+		}
+	}
 	logLimited(slog.Default(), lost, len(lost), "Version is not in the mirror, so it is not promoted into "+ring, func(gap Gap) []any {
 		return []any{"from", gap.Ring, "id", gap.ComponentID, "name", gap.Name, "version", gap.Version}
 	})
@@ -211,7 +249,8 @@ func newBareEntries(entries []Entry, components []lvfs.Component) *bareEntries {
 	mirrored, unclaimed := claims(entries, components)
 	bare := &bareEntries{at: make(map[string]int), unclaimed: unclaimed}
 	for i, entry := range entries {
-		if _, claimed := mirrored[entry.Key()]; entry.Platform == "" && !claimed {
+		// A held entry stands for the components of its ID as it is: it is not given a platform.
+		if _, claimed := mirrored[entry.Key()]; entry.Platform == "" && !claimed && !entry.Hold {
 			bare.at[entry.ID] = i
 		}
 	}
@@ -261,14 +300,23 @@ func (u *undatedNotes) warn() {
 // Prune returns the file without the entries whose component the mirror no
 // longer has, and those entries. A platformless entry stands for the mirrored
 // components of its ID that no other entry is about, and goes when there are
-// none. components are the mirrored ones, as for Promote.
+// none. A held one holds its ID whole, so it stays while the mirror has a
+// component of its ID, as it holds those that come. components are the mirrored
+// ones, as for Promote.
 func (f *File) Prune(components []lvfs.Component) (*File, []Entry) {
 	mirrored, unclaimed := claims(f.Components, components)
+	ids := make(map[string]struct{}, len(components))
+	for _, component := range components {
+		ids[component.ID] = struct{}{}
+	}
 	pruned := f.Clone()
 	var removed []Entry
 	pruned.Components = slices.DeleteFunc(pruned.Components, func(entry Entry) bool {
 		_, kept := mirrored[entry.Key()]
 		if entry.Platform == "" && len(unclaimed[entry.ID]) > 0 {
+			kept = true
+		}
+		if _, mirroredID := ids[entry.ID]; entry.HoldsWhole() && mirroredID {
 			kept = true
 		}
 		if !kept {

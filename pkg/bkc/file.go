@@ -48,13 +48,44 @@ type Entry struct {
 	// the same versions; see Platform.
 	Platform string `yaml:"platform,omitempty"`
 	// Name is informational.
-	Name     string            `yaml:"name,omitempty"`
+	Name string `yaml:"name,omitempty"`
+	// Hold keeps the component out of every ring, whatever Versions says, and out
+	// of promotions: for one that another makes redundant, such as an older package
+	// of a device that the other also updates, which no ring should serve.
+	Hold     bool              `yaml:"hold,omitempty"`
 	Versions map[string]string `yaml:"versions"`
 }
 
 // Key identifies the component the entry is about, as keyOf does for a mirrored one.
 func (e Entry) Key() string {
 	return entryKey(e.ID, e.Platform)
+}
+
+// Served returns the version a ring serves of the component: none when the entry
+// names none for it, or is held.
+func (e Entry) Served(ring string) string {
+	if e.Hold {
+		return ""
+	}
+	return e.Versions[ring]
+}
+
+// HoldsWhole reports whether the entry holds its ID whole, as a held one does that
+// has no platform; one with a platform holds that component only.
+func (e Entry) HoldsWhole() bool {
+	return e.Hold && e.Platform == ""
+}
+
+// Serves reports whether some entry has a ring serve a version, so that its tag is
+// published.
+func (f *File) Serves(ring string) bool {
+	return slices.ContainsFunc(f.Components, func(entry Entry) bool { return entry.Served(ring) != "" })
+}
+
+// HeldOnly reports whether a ring serves nothing for lack of an entry that is not
+// held: every entry that names a version for it is held, and some does.
+func (f *File) HeldOnly(ring string) bool {
+	return !f.Serves(ring) && slices.ContainsFunc(f.Components, func(entry Entry) bool { return entry.Hold && entry.Versions[ring] != "" })
 }
 
 // New returns a file with the given rings and no component.
@@ -164,15 +195,57 @@ func Blank(data []byte) bool {
 	}
 }
 
+// checkHold refuses a hold left blank, which would read as off and serve what was
+// to be held, however the blank gets to the entry: written there, through an alias,
+// or through a merge key, which an explicit hold overrides. A mapping is walked
+// once, which ends a merge that reaches itself and keeps a merge of merges linear.
+func checkHold(entry *yaml.Node, seen map[*yaml.Node]bool) error {
+	entry = resolveAlias(entry)
+	if entry.Kind != yaml.MappingNode || seen[entry] {
+		return nil
+	}
+	seen[entry] = true
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		key, value := entry.Content[i], resolveAlias(entry.Content[i+1])
+		switch key.Value {
+		case "hold":
+			if value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+				return fmt.Errorf("invalid YAML: line %d: hold has no value: write true, or false", key.Line)
+			}
+			return nil
+		case "<<":
+			if value.Kind == yaml.SequenceNode {
+				merged = append(merged, value.Content...)
+			} else {
+				merged = append(merged, value)
+			}
+		}
+	}
+	for _, one := range merged {
+		if err := checkHold(one, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	for node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
+}
+
 // blankDocument reports whether a document holds nothing, as `---` alone does.
 func blankDocument(document *yaml.Node) bool {
 	return document.Kind == yaml.DocumentNode && len(document.Content) == 1 &&
 		document.Content[0].Kind == yaml.ScalarNode && document.Content[0].Tag == "!!null" && document.Content[0].Value == ""
 }
 
-// checkNodes fails on an empty item in the rings or components list, and on a
-// version that is not an integer, which decoding into an int would truncate, or
-// that this firmirror does not know.
+// checkNodes fails on an empty item in the rings or components list, on a hold
+// with no value, and on a version that is not an integer, which decoding into an
+// int would truncate, or that this firmirror does not know.
 func checkNodes(data []byte) error {
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
@@ -182,6 +255,7 @@ func checkNodes(data []byte) error {
 		return nil
 	}
 	fields := document.Content[0].Content
+	seen := map[*yaml.Node]bool{}
 	for i := 0; i+1 < len(fields); i += 2 {
 		if fields[i].Value == "version" {
 			if fields[i+1].Kind == yaml.ScalarNode && fields[i+1].Tag != "!!int" {
@@ -198,6 +272,11 @@ func checkNodes(data []byte) error {
 		for _, item := range fields[i+1].Content {
 			if item.Kind == yaml.ScalarNode && item.Tag == "!!null" {
 				return fmt.Errorf("invalid YAML: line %d: an empty item in %s", item.Line, fields[i].Value)
+			}
+			if fields[i].Value == "components" {
+				if err := checkHold(item, seen); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -289,6 +368,9 @@ func (f *File) Marshal() ([]byte, error) {
 		}
 		if entry.Name != "" {
 			add(item, "name", text(entry.Name))
+		}
+		if entry.Hold {
+			add(item, "hold", scalar("true", 0))
 		}
 		versions := mapping()
 		for _, ring := range f.Rings {

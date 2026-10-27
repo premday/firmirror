@@ -349,3 +349,118 @@ func TestBlank(t *testing.T) {
 	assert.False(t, Blank([]byte("---\n---\n"+sample)), "a file that starts with an empty document is not empty")
 	assert.False(t, Blank([]byte(sample)))
 }
+
+func TestHoldIsWrittenAndReadBack(t *testing.T) {
+	file := New(DefaultRings)
+	file.Components = []Entry{
+		{ID: "a", Hold: true, Versions: map[string]string{"dev": "1.0"}},
+		{ID: "b", Versions: map[string]string{"dev": "1.0"}},
+	}
+
+	data, err := file.Marshal()
+	require.NoError(t, err)
+
+	assert.Equal(t, `version: 1
+rings: [dev, beta, preview, stable]
+components:
+  - id: a
+    hold: true
+    versions: {dev: "1.0"}
+  - id: b
+    versions: {dev: "1.0"}
+`, string(data), "only a held entry says so")
+	again, err := Parse(data)
+	require.NoError(t, err)
+	assert.True(t, again.Components[0].Hold)
+	assert.False(t, again.Components[1].Hold)
+}
+
+func TestServedIsWhatARingServesOfAnEntryThatIsNotHeld(t *testing.T) {
+	entry := Entry{ID: "a", Versions: map[string]string{"dev": "1.0"}}
+
+	assert.Equal(t, "1.0", entry.Served("dev"))
+	assert.Empty(t, entry.Served("beta"), "it names none for that ring")
+
+	entry.Hold = true
+	assert.Empty(t, entry.Served("dev"), "held, it serves none, whatever it names")
+}
+
+func TestHeldIDsAreThoseOfAHeldEntryWithNoPlatform(t *testing.T) {
+	file := New(DefaultRings)
+	file.Components = []Entry{
+		{ID: "whole", Hold: true},
+		{ID: "platform", Platform: "p1", Hold: true},
+		{ID: "both", Hold: true},
+		{ID: "both", Platform: "p1", Hold: true},
+		{ID: "free", Versions: map[string]string{"dev": "1.0"}},
+	}
+
+	whole, byPlatform := file.heldIDs()
+
+	assert.Equal(t, map[string]struct{}{"whole": {}, "both": {}}, whole, "those with a held entry that holds the whole ID")
+	assert.Equal(t, map[string]struct{}{"platform": {}, "both": {}}, byPlatform, "those with a held entry that holds its component only")
+}
+
+func TestParseRefusesAHoldLeftBlank(t *testing.T) {
+	for _, value := range []string{"", " # TODO", " ~", " null"} {
+		_, err := Parse([]byte("version: 1\nrings: [dev]\ncomponents:\n  - id: a\n    hold:" + value + "\n    versions: {dev: \"1.0\"}\n"))
+
+		assert.ErrorContains(t, err, "hold has no value", "hold:%q would read as off, and serve what was to be held", value)
+	}
+	_, err := Parse([]byte("version: 1\nrings: [dev]\ncomponents:\n  - id: a\n    name: &blank ~\n    hold: *blank\n    versions: {dev: \"1.0\"}\n"))
+	assert.ErrorContains(t, err, "hold has no value", "an alias of a blank is one")
+	file, err := Parse([]byte("version: 1\nrings: [dev]\ncomponents:\n  - id: a\n    hold: false\n    versions: {dev: \"1.0\"}\n"))
+	require.NoError(t, err)
+	assert.False(t, file.Components[0].Hold, "false is a value")
+}
+
+func TestParseRefusesAHoldLeftBlankWhateverTheWayItGetsToTheEntry(t *testing.T) {
+	for name, entry := range map[string]string{
+		"an item that is an alias": "x: &t {id: a, hold: ~, versions: {dev: \"1.0\"}}\ncomponents:\n  - *t\n",
+		"a merge key":              "components:\n  - id: a\n    <<: {hold: ~}\n    versions: {dev: \"1.0\"}\n",
+		"a merge of several":       "x: &b {hold: ~}\ncomponents:\n  - id: a\n    <<: [{name: n}, *b]\n    versions: {dev: \"1.0\"}\n",
+	} {
+		_, err := parse([]byte("version: 1\nrings: [dev]\n"+entry), true)
+
+		assert.ErrorContains(t, err, "hold has no value", name)
+	}
+
+	file, err := parse([]byte("version: 1\nrings: [dev]\nx: &b {hold: ~}\ncomponents:\n  - id: a\n    <<: *b\n    hold: true\n    versions: {dev: \"1.0\"}\n"), true)
+	require.NoError(t, err, "an explicit hold overrides the merged one")
+	assert.True(t, file.Components[0].Hold)
+}
+
+func TestParseRefusesAMergeThatReachesItself(t *testing.T) {
+	_, err := parse([]byte("version: 1\nrings: [dev]\ncomponents:\n  - &a\n    id: x\n    <<: *a\n"), true)
+	assert.ErrorContains(t, err, "contains itself", "an error is returned, not a stack overflow")
+
+	var merges strings.Builder
+	merges.WriteString("version: 1\nrings: [dev]\nx0: &m0 {id: x}\n")
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&merges, "x%d: &m%d {<<: [*m%d, *m%d]}\n", i, i, i-1, i-1)
+	}
+	merges.WriteString("components:\n  - <<: *m60\n")
+	_, err = parse([]byte(merges.String()), true)
+	assert.ErrorContains(t, err, "aliasing", "a merge of merges is refused, not walked once per path")
+}
+
+func TestHoldsWholeIsAHeldEntryWithNoPlatform(t *testing.T) {
+	assert.True(t, Entry{ID: "a", Hold: true}.HoldsWhole())
+	assert.False(t, Entry{ID: "a", Platform: "p1", Hold: true}.HoldsWhole(), "it holds its component only")
+	assert.False(t, Entry{ID: "a"}.HoldsWhole())
+}
+
+func TestServesAndHeldOnlyTellWhatARingHas(t *testing.T) {
+	file := New(DefaultRings)
+	file.Components = []Entry{
+		{ID: "a", Hold: true, Versions: map[string]string{"dev": "1.0", "beta": "1.0"}},
+		{ID: "b", Versions: map[string]string{"dev": "1.0"}},
+	}
+
+	assert.True(t, file.Serves("dev"))
+	assert.False(t, file.Serves("beta"), "the only entry that names it is held")
+	assert.False(t, file.Serves("stable"))
+	assert.False(t, file.HeldOnly("dev"), "an entry that is not held serves it")
+	assert.True(t, file.HeldOnly("beta"), "held entries are all that name it")
+	assert.False(t, file.HeldOnly("stable"), "no entry names it at all")
+}

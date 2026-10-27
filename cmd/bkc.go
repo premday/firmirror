@@ -39,7 +39,17 @@ func runBKCStatus(ctx context.Context) error {
 	for _, entry := range file.Components {
 		versions := make([]string, 0, len(shown))
 		for _, ring := range shown {
-			versions = append(versions, cmp.Or(entry.Versions[ring], "-"))
+			version := entry.Versions[ring]
+			switch {
+			case entry.Hold && version != "":
+				// What the entry would serve once the hold is taken off.
+				version = "held (" + version + ")"
+			case entry.Hold:
+				version = "held"
+			case version == "":
+				version = "-"
+			}
+			versions = append(versions, version)
 		}
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", entry.ID, cmp.Or(entry.Platform, "-"), bkc.OneLine(entry.Name), strings.Join(versions, "\t"))
 	}
@@ -157,7 +167,11 @@ func runBKCPromote(ctx context.Context) error {
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n", change.ComponentID, cmp.Or(change.Platform, "-"), bkc.OneLine(change.Name), cmp.Or(change.From, "-"), change.To, change.Note())
 	}
 	for _, entry := range removed {
-		fmt.Fprintf(table, "%s\t%s\t%s\t\t\tremoved, the mirror does not have it\n", entry.ID, cmp.Or(entry.Platform, "-"), bkc.OneLine(entry.Name))
+		note := "removed, the mirror does not have it"
+		if entry.Hold {
+			note += ", and it was held"
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t\t\t%s\n", entry.ID, cmp.Or(entry.Platform, "-"), bkc.OneLine(entry.Name), note)
 	}
 	if err := table.Flush(); err != nil {
 		return err
