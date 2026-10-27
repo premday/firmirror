@@ -263,8 +263,16 @@ Things to know:
   releases are served by different rings is published as several components of the same ID and GUIDs,
   one per set of tags. fwupd merges the releases of every component matching a device.
 - Rings work per component, an ID and its GUIDs. fwupd resolves a device across every component
-  providing its GUID, and `fwupdmgr sync` takes the newest tagged release among them, so a device whose
-  GUID two components provide can be moved by the other one. Several Dell platforms share GUIDs this way.
+  providing its GUID, and `fwupdmgr sync` takes the first tagged release of what fwupd lists for it, which
+  is sorted by branch, then by version, newest first. A device whose GUID two components provide can
+  therefore be moved by the other one, and a ring that moves one of them back does not move a device the
+  other one's newer release also serves. Several Dell and HPE platforms share GUIDs this way. The refresh
+  and `regen-metadata` log each pair of components served different releases once, for the rings that
+  serve the same two, with the ID and platform of each, how many GUIDs they share and how many only one has.
+  When one provides every GUID of the other, it is only a matter of which version a device is given. When each
+  has GUIDs of its own, the GUIDs a device matches decide: those are the ones to look at, and the log names
+  the first of the GUIDs only one has. It keeps at most 10,000 pairs per ring and looks at no more than
+  twenty million, which the log says: the pairs it lists are then not all.
 - A version the file names that is no longer mirrored leaves its ring serving nothing for that component,
   which the refresh logs, as it does the components the file has no entry for.
 - Two runs publishing at once can still replace one another's metadata: `concurrencyPolicy: Forbid` does
