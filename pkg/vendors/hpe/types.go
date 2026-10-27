@@ -91,6 +91,14 @@ type HPEPackage struct {
 	SwKeys                 []HPESwKey                `json:"sw_keys"`
 }
 
+// HPEPackageFile is a file of the package as the sidecar JSON lists it. Its
+// size is a string there.
+type HPEPackageFile struct {
+	Name      string `json:"Name"`
+	Bytes     string `json:"Bytes"`
+	SHA256Sum string `json:"SHA256Sum"`
+}
+
 type HPECategory struct {
 	Key       string            `json:"key"`
 	Languages []HPETranslations `json:"languages"`

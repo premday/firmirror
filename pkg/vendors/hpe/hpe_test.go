@@ -3,7 +3,10 @@ package hpe
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -408,4 +411,60 @@ func TestBuildAppStream_SystemBoardTarget(t *testing.T) {
 func TestUnixTime(t *testing.T) {
 	assert.Equal(t, int64(0), unixTime(time.Time{}), "a package with no date gives no timestamp, not a negative one")
 	assert.Equal(t, int64(1718928000), unixTime(time.Date(2024, 6, 21, 0, 0, 0, 0, time.UTC)))
+}
+
+func TestHPEVendor_RetrieveFirmwareVerifiesDownload(t *testing.T) {
+	filename := "test-firmware-v1.0.0.fwpkg"
+	sum := sha256.Sum256([]byte("Mock firmware content for " + filename))
+	good := hex.EncodeToString(sum[:])
+
+	mux := http.NewServeMux()
+	var sidecar string
+	mux.HandleFunc("/current/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".json") {
+			if sidecar == "" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write([]byte(sidecar))
+			return
+		}
+		w.Write([]byte("Mock firmware content for " + filepath.Base(r.URL.Path)))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	vendor := &HPEVendor{BaseURL: server.URL}
+
+	files := func(name, bytes, digest string) string {
+		return fmt.Sprintf(`{"Package":{"Files":[{"Name":"%s","Bytes":"%s","SHA256Sum":"%s"}]}}`, name, bytes, digest)
+	}
+	size := fmt.Sprint(len("Mock firmware content for " + filename))
+	tests := map[string]struct {
+		sidecar string
+		valid   bool
+	}{
+		"Valid":          {files(filename, size, good), true},
+		"UpperCase":      {files(filename, size, strings.ToUpper(good)), true},
+		"NoSidecar":      {"", true},
+		"NotJSON":        {"not json", true},
+		"NoDigest":       {`{"Package":{"Files":[]}}`, true},
+		"OtherFileOnly":  {files("other.fwpkg", size, strings.Repeat("0", 64)), true},
+		"DigestMismatch": {files(filename, size, strings.Repeat("0", 64)), false},
+		"SizeMismatch":   {files(filename, "1", good), false},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			sidecar = test.sidecar
+			tmpDir := t.TempDir()
+			entry := &HPEFirmwareEntry{Filename: filename, Entry: &HPECatalogEntry{}}
+			err := vendor.RetrieveFirmware(context.Background(), entry, tmpDir)
+			if test.valid {
+				assert.NoError(t, err)
+				assert.FileExists(t, filepath.Join(tmpDir, filename))
+				return
+			}
+			assert.Error(t, err, "A download the sidecar does not vouch for should fail")
+			assert.NoFileExists(t, filepath.Join(tmpDir, filename), "A rejected download should not be left behind")
+		})
+	}
 }

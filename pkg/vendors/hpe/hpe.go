@@ -3,6 +3,8 @@ package hpe
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,9 +143,64 @@ func (hv *HPEVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firmw
 		}
 	}
 
+	if err := verifyDownload(filepath, hpeEntry.PayloadJSON); err != nil {
+		os.Remove(filepath)
+		return fmt.Errorf("verifying HPE firmware %s: %w", hpeEntry.Filename, err)
+	}
+
 	// Store the download path in the entry for later processing
 	hpeEntry.DownloadPath = filepath
 	return nil
+}
+
+// verifyDownload checks the downloaded file against the size and the SHA-256 the
+// sidecar JSON gives for it, so a truncated or corrupted download is never
+// published. Without a sidecar, or without a digest for the file in it, there is
+// nothing to check against.
+func verifyDownload(path string, sidecar []byte) error {
+	listed, ok := sidecarFile(sidecar, filepath.Base(path))
+	if !ok || listed.SHA256Sum == "" {
+		slog.Warn("The sidecar JSON gives no digest for this firmware, so it is not verified", "path", path)
+		return nil
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, file)
+	if err != nil {
+		return err
+	}
+	if want, err := strconv.ParseInt(listed.Bytes, 10, 64); err == nil && size != want {
+		return fmt.Errorf("downloaded %d bytes, the sidecar JSON says %d", size, want)
+	}
+	if got := hex.EncodeToString(hasher.Sum(nil)); !strings.EqualFold(got, listed.SHA256Sum) {
+		return fmt.Errorf("digest is %s, the sidecar JSON says %s", got, listed.SHA256Sum)
+	}
+	return nil
+}
+
+// sidecarFile is the entry of the sidecar JSON's Package.Files for the firmware
+// package of that name.
+func sidecarFile(sidecar []byte, name string) (HPEPackageFile, bool) {
+	var payload struct {
+		Package struct {
+			Files []HPEPackageFile `json:"Files"`
+		} `json:"Package"`
+	}
+	if json.Unmarshal(sidecar, &payload) != nil {
+		return HPEPackageFile{}, false
+	}
+	for _, file := range payload.Package.Files {
+		if file.Name == name {
+			return file, true
+		}
+	}
+	return HPEPackageFile{}, false
 }
 
 // ListEntries implements the Catalog interface for HPECatalog
