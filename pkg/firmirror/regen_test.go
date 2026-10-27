@@ -319,6 +319,33 @@ func TestPreflightRefusesAStoredTagNoRingCouldPublish(t *testing.T) {
 	assert.NoError(t, same.Preflight(ctx), "a ring that moves to another version still publishes its tag")
 }
 
+func TestPreflightCountsNoRingToBePublishedByAHeldEntry(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0", "10.0"), versioned("10.0", "a.cab"))
+
+	held := definitions("10.0", "10.0")
+	held.Components[0].Hold = true
+	syncer := newRingsSyncer(t, dir, held)
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	assert.ErrorContains(t, syncer.Preflight(ctx), "firmirror-beta, firmirror-dev", "a held entry publishes no tag, whatever versions it names")
+	assert.ErrorContains(t, syncer.Preflight(ctx), "entries are all held", "and the error says so")
+
+	renamed := definitions("10.0", "10.0")
+	renamed.TagPrefix = "other"
+	prefix := newRingsSyncer(t, dir, renamed)
+	require.NoError(t, prefix.LoadMetadata(ctx))
+	err := prefix.Preflight(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "firmirror-beta", "a changed prefix drops the tags too")
+	assert.NotContains(t, err.Error(), "held", "but no entry is held, so the hint would mislead")
+
+	held.Components = append(held.Components, bkc.Entry{ID: "com.test.other", Versions: map[string]string{"dev": "1.0", "beta": "1.0"}})
+	kept := newRingsSyncer(t, dir, held)
+	require.NoError(t, kept.LoadMetadata(ctx))
+	assert.NoError(t, kept.Preflight(ctx), "an entry that is not held keeps the rings")
+}
+
 func TestPreflightHoldsARemirrorToTheTagsOfWhatItDiscarded(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

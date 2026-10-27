@@ -226,6 +226,13 @@ func TestBKCStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, out, "DEV")
 
+	definitions.Components = append(definitions.Components, bkc.Entry{ID: "com.test.old", Hold: true, Versions: map[string]string{"dev": "1.0"}})
+	require.NoError(t, definitions.Write(file))
+	args.Rollout.Status.Ring = ""
+	out, err = capture(t, func() error { return runBKCStatus(context.Background()) })
+	require.NoError(t, err)
+	assert.Regexp(t, `com\.test\.old\s+-\s+held \(1\.0\)\s+held\b`, out, "a held component is served by no ring, and the versions it would serve are kept in view")
+
 	args.Rollout.Status.Ring = "nowhere"
 	assert.ErrorContains(t, runBKCStatus(context.Background()), `unknown ring "nowhere"`)
 
@@ -271,6 +278,23 @@ func TestPromotePrunesWhatTheMirrorLost(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, loaded.Components, 1)
 	assert.Equal(t, "com.test.nic", loaded.Components[0].ID)
+}
+
+func TestPromoteSaysWhenItPrunesAnEntryThatWasHeld(t *testing.T) {
+	withArgs(t)
+	metadata := writeMetadata(t, "metadata.xml.zst", "1.0", "2.0")
+	file := filepath.Join(t.TempDir(), "bkc.yml")
+	definitions := bkc.New(bkc.DefaultRings)
+	definitions.Components = []bkc.Entry{
+		{ID: "com.gone", Platform: bkc.Platform([]string{"g9"}), Hold: true, Versions: map[string]string{"dev": "1.0"}},
+		{ID: "com.test.nic", Versions: map[string]string{"dev": "1.0"}},
+	}
+	require.NoError(t, definitions.Write(file))
+
+	out, err := promoteRing(t, file, metadata, "dev", func() { args.Rollout.Promote.Prune = true })
+
+	require.NoError(t, err)
+	assert.Regexp(t, `com\.gone\s+\S+.*removed, the mirror does not have it, and it was held`, out)
 }
 
 func TestPromoteTakesAFileURLForAPath(t *testing.T) {

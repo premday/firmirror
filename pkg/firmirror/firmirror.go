@@ -560,8 +560,14 @@ func (f *FirmirrorSyncer) untagging() error {
 		return nil
 	}
 	shown := dropped[:min(len(dropped), 5)]
+	hint := ""
+	if f.Config.BKC != nil && slices.ContainsFunc(f.Config.BKC.Rings, func(ring string) bool {
+		return slices.Contains(dropped, f.Config.BKC.Tag(ring)) && f.Config.BKC.HeldOnly(ring)
+	}) {
+		hint = ", where a ring whose entries are all held serves nothing"
+	}
 	return fmt.Errorf("the stored metadata has ring tags that would no longer be published (%s, %d in all), which takes the hosts on those rings off them: "+
-		"check the rollout ring definitions (--bkc.file), or force it if that is the point", strings.Join(shown, ", "), len(dropped))
+		"check the rollout ring definitions (--bkc.file)%s, or force it if that is the point", strings.Join(shown, ", "), len(dropped), hint)
 }
 
 // noRingTag refuses a built document with no ring tag at all over a stored one
@@ -586,15 +592,15 @@ func (f *FirmirrorSyncer) checkTags(published []string) error {
 }
 
 // possibleTags are the tags the definitions can publish, sorted: those of the
-// rings some entry names a version for. A ring whose versions the mirror lost
-// still counts, as its hosts stay where they are.
+// rings some entry that is not held names a version for. A ring whose versions
+// the mirror lost still counts, as its hosts stay where they are.
 func (f *FirmirrorSyncer) possibleTags() []string {
 	if f.Config.BKC == nil {
 		return nil
 	}
 	var tags []string
 	for _, ring := range f.Config.BKC.Rings {
-		if slices.ContainsFunc(f.Config.BKC.Components, func(entry bkc.Entry) bool { return entry.Versions[ring] != "" }) {
+		if f.Config.BKC.Serves(ring) {
 			tags = append(tags, f.Config.BKC.Tag(ring))
 		}
 	}

@@ -60,6 +60,24 @@ func (f *File) Upstream(ring string) (string, error) {
 	return f.Rings[index-1], nil
 }
 
+// heldIDs are the IDs that have a held entry. One without a platform stands for
+// the components of its ID that have no entry of their own, and holds them all:
+// the ID is held whole. One with a platform holds that component only, so another
+// platform of the ID is served as any other is.
+func (f *File) heldIDs() (whole, byPlatform map[string]struct{}) {
+	whole, byPlatform = make(map[string]struct{}), make(map[string]struct{})
+	for _, entry := range f.Components {
+		switch {
+		case !entry.Hold:
+		case entry.HoldsWhole():
+			whole[entry.ID] = struct{}{}
+		default:
+			byPlatform[entry.ID] = struct{}{}
+		}
+	}
+	return whole, byPlatform
+}
+
 func (f *File) entries() map[string]*Entry {
 	entries := make(map[string]*Entry, len(f.Components))
 	for i := range f.Components {
@@ -385,8 +403,13 @@ type Report struct {
 	// of one can be moved to a release of the other. Vendors share hundreds of
 	// GUIDs between platforms, so a pair is one entry, whatever the GUIDs.
 	Overlaps []Overlap
-	// Unmanaged counts the mirrored components with no entry; no ring serves them
-	// until `bkc promote` adds them.
+	// Held counts the mirrored components that are held out of every ring: those
+	// of a held entry, and those with no entry of an ID whose held entry has no
+	// platform.
+	Held int
+	// Unmanaged counts the mirrored components with no entry, and no held entry
+	// without a platform for their ID; no ring serves them until `bkc promote`
+	// adds them.
 	Unmanaged int
 }
 
@@ -400,6 +423,7 @@ func (f *File) Apply(components []lvfs.Component) *Report {
 func (f *File) apply(components []lvfs.Component, bounds overlapBounds) *Report {
 	report := &Report{Tagged: make(map[string]int)}
 	entries := f.entries()
+	heldIDs, _ := f.heldIDs()
 	seen := make(map[string]struct{}, len(entries))
 	mirrored := make(map[string]struct{}, len(components))
 	served := make(map[string][]servedRelease)
@@ -414,13 +438,20 @@ func (f *File) apply(components []lvfs.Component, bounds overlapBounds) *Report 
 		key := entryKey(component.ID, members[i].platform)
 		entry, managed := entries[key]
 		if !managed {
-			report.Unmanaged++
+			if _, held := heldIDs[component.ID]; held {
+				report.Held++
+			} else {
+				report.Unmanaged++
+			}
 			continue
 		}
 		seen[key] = struct{}{}
+		if entry.Hold {
+			report.Held++
+		}
 
 		for _, ring := range f.Rings {
-			version := entry.Versions[ring]
+			version := entry.Served(ring)
 			if version == "" {
 				continue
 			}
@@ -444,7 +475,12 @@ func (f *File) apply(components []lvfs.Component, bounds overlapBounds) *Report 
 			continue
 		}
 		if _, ok := mirrored[entry.ID]; ok {
-			report.Mismatched = append(report.Mismatched, entry)
+			// A held entry without a platform holds its ID whole, whatever the
+			// components of it that have an entry. One with a platform that the mirror
+			// lacks may be a package that changed it.
+			if !entry.HoldsWhole() {
+				report.Mismatched = append(report.Mismatched, entry)
+			}
 		} else {
 			report.Unknown = append(report.Unknown, entry.ID)
 		}
@@ -476,8 +512,16 @@ func (r *Report) LogTo(logger *slog.Logger) {
 		logger.Warn("There are more pairs of components served different releases through a GUID than were looked at or kept, so those listed are not all, and the rings of a pair may not be", "listed", len(r.Overlaps))
 	}
 	logLimited(logger, r.Mismatched, len(r.Mismatched), "The mirror has these components, but not with the platform of their entry in the definitions, so no ring serves them", func(entry Entry) []any {
-		return []any{"id", entry.ID, "platform", entry.Platform}
+		attrs := []any{"id", entry.ID, "platform", entry.Platform}
+		if entry.Hold {
+			// The package it holds may have changed its platform.
+			attrs = append(attrs, "hold", true)
+		}
+		return attrs
 	})
+	if r.Held > 0 {
+		logger.Info("Components held out of every ring, as the definitions say", "components", r.Held)
+	}
 	if r.Unmanaged > 0 {
 		logger.Info("Mirrored components that no ring serves, as the definitions have no entry for them", "components", r.Unmanaged)
 	}

@@ -521,3 +521,113 @@ func TestLogToSaysWhichPairsEachHaveGUIDsOfTheirOwn(t *testing.T) {
 	assert.Contains(t, lines[1], "provides every GUID of another")
 	assert.Contains(t, lines[1], "id=c")
 }
+
+func TestApplyLeavesAHeldComponentOutOfEveryRing(t *testing.T) {
+	file := testFile(t,
+		Entry{ID: "a", Hold: true, Versions: map[string]string{"dev": "1.0", "beta": "9.9"}},
+		Entry{ID: "b", Versions: map[string]string{"dev": "1.0"}},
+	)
+	components := []lvfs.Component{component("a", release("1.0", "2026-01-01")), component("b", release("1.0", "2026-01-01"))}
+
+	report := file.Apply(components)
+
+	assert.Empty(t, components[0].Releases[0].Tags)
+	assert.Equal(t, []string{"firmirror-dev"}, components[1].Releases[0].Tags)
+	assert.Equal(t, 1, report.Held)
+	assert.Equal(t, map[string]int{"dev": 1}, report.Tagged)
+	assert.Empty(t, report.Dangling, "a version it is not served is no gap")
+	assert.Empty(t, report.Unknown)
+	assert.Zero(t, report.Unmanaged, "it has an entry")
+}
+
+func TestApplyDoesNotReportAHeldComponentAsOverlapping(t *testing.T) {
+	older := guided("a", []string{"g1"}, release("1.0", "2026-01-01"))
+	newer := guided("b", []string{"g1"}, release("2.0", "2026-01-01"))
+	file := testFile(t,
+		Entry{ID: "a", Platform: platformOf(older), Hold: true, Versions: map[string]string{"dev": "1.0"}},
+		entryOf(newer, map[string]string{"dev": "2.0"}),
+	)
+
+	report := file.Apply([]lvfs.Component{older, newer})
+
+	assert.Empty(t, report.Overlaps)
+}
+
+func TestLogToSaysHowManyComponentsAreHeld(t *testing.T) {
+	out := logOf(&Report{Held: 3})
+
+	assert.Contains(t, out, "held out of every ring")
+	assert.Contains(t, out, "components=3")
+}
+
+func TestApplyCountsAHeldEntryWithNoPlatformAsHoldingTheComponentsOfItsID(t *testing.T) {
+	file := testFile(t,
+		Entry{ID: "a", Hold: true, Versions: map[string]string{"dev": "1.0"}},
+		Entry{ID: "c", Versions: map[string]string{"dev": "1.0"}},
+	)
+	components := []lvfs.Component{
+		platform("a", "g1", release("1.0", "2026-01-01")),
+		platform("a", "g2", release("1.0", "2026-01-01")),
+		platform("b", "g3", release("1.0", "2026-01-01")),
+	}
+
+	report := file.Apply(components)
+
+	assert.Equal(t, 2, report.Held, "both platforms of a")
+	assert.Equal(t, 1, report.Unmanaged, "b has no entry, and no held one")
+	assert.Empty(t, report.Mismatched, "the held entry stands for the platforms it names none of")
+	assert.Equal(t, []string{"c"}, report.Unknown, "c is not mirrored")
+	assert.Empty(t, components[0].Releases[0].Tags)
+	assert.Empty(t, components[1].Releases[0].Tags)
+}
+
+func TestApplyLeavesTheNewPlatformOfAHeldPackageUnmanagedWhileTheOldOneIsStillMirrored(t *testing.T) {
+	held := platform("a", "g1", release("1.0", "2026-01-01"))
+	// The vendor added a GUID to the package: the mirror has it under a new platform, and the held one too.
+	changed := guided("a", []string{"g1", "g2"}, release("1.0", "2026-01-01"))
+	file := testFile(t, Entry{ID: "a", Platform: platformOf(held), Hold: true, Versions: map[string]string{"dev": "1.0"}})
+
+	report := file.Apply([]lvfs.Component{held, changed})
+
+	assert.Equal(t, 1, report.Held, "the held entry still holds its component")
+	assert.Equal(t, 1, report.Unmanaged, "the new platform has no entry: it is served once `promote` makes one, and warns of it")
+	assert.Empty(t, report.Mismatched)
+	assert.Empty(t, changed.Releases[0].Tags)
+}
+
+func TestApplyReportsAHeldEntryWhosePlatformIsNoLongerMirrored(t *testing.T) {
+	held := platform("a", "g1", release("1.0", "2026-01-01"))
+	// As when the stored document was discarded: the mirror has the package under its new platform only.
+	changed := guided("a", []string{"g1", "g2"}, release("1.0", "2026-01-01"))
+	file := testFile(t, Entry{ID: "a", Platform: platformOf(held), Hold: true, Versions: map[string]string{"dev": "1.0"}})
+
+	report := file.Apply([]lvfs.Component{changed})
+
+	assert.Zero(t, report.Held, "a held entry with a platform holds that component only")
+	assert.Equal(t, 1, report.Unmanaged, "the package under its new platform has no entry, which `promote` makes")
+	require.Len(t, report.Mismatched, 1, "the held entry is reported as one the mirror lacks, which is how the change shows")
+	assert.True(t, report.Mismatched[0].Hold)
+	assert.Empty(t, changed.Releases[0].Tags)
+}
+
+func TestApplyDoesNotReportAHeldEntryWithNoPlatformWhateverTheComponentsOfItsIDHave(t *testing.T) {
+	a := platform("a", "g1", release("1.0", "2026-01-01"))
+	file := testFile(t,
+		Entry{ID: "a", Hold: true, Versions: map[string]string{"dev": "1.0"}},
+		entryOf(a, map[string]string{"dev": "1.0"}),
+	)
+
+	report := file.Apply([]lvfs.Component{a})
+
+	assert.Empty(t, report.Mismatched, "it holds its ID whole: the components that come, as well as those that have an entry")
+	assert.Zero(t, report.Held, "and none is held now")
+}
+
+func TestLogToSaysWhichMismatchedEntryIsAHoldOnNothing(t *testing.T) {
+	out := logOf(&Report{Mismatched: []Entry{{ID: "a", Hold: true}, {ID: "b"}}})
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], "hold=true")
+	assert.NotContains(t, lines[1], "hold=")
+}
