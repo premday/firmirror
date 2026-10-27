@@ -3,10 +3,15 @@ package dell
 import (
 	"compress/gzip"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"html"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -133,6 +138,47 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 		}
 	}
 
+	if err := verifyDownload(filepath, dellEntry.DellSoftwareComponent); err != nil {
+		os.Remove(filepath)
+		return fmt.Errorf("verifying Dell firmware %s: %w", fwPath, err)
+	}
+
+	return nil
+}
+
+// verifyDownload checks the downloaded file against the size and the digest the
+// catalog gives, so a truncated or corrupted download is never published. The
+// SHA-256 is preferred over the MD5; a component the catalog gives neither for
+// is only checked for its size.
+func verifyDownload(path string, component *DellSoftwareComponent) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	var hasher hash.Hash
+	var want string
+	switch {
+	case component.Hash != "" && strings.EqualFold(component.HashAlgorithm, "SHA256"):
+		hasher, want = sha256.New(), component.Hash
+	case component.HashMD5 != "":
+		hasher, want = md5.New(), component.HashMD5
+	default:
+		slog.Warn("The catalog gives no digest for this firmware, so it is not verified", "path", component.Path)
+		hasher = sha256.New()
+	}
+
+	size, err := io.Copy(hasher, file)
+	if err != nil {
+		return err
+	}
+	if component.Size > 0 && size != component.Size {
+		return fmt.Errorf("downloaded %d bytes, the catalog says %d", size, component.Size)
+	}
+	if got := hex.EncodeToString(hasher.Sum(nil)); want != "" && !strings.EqualFold(got, want) {
+		return fmt.Errorf("digest is %s, the catalog says %s", got, want)
+	}
 	return nil
 }
 
