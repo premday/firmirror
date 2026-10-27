@@ -33,6 +33,8 @@ type DellFirmwareEntry struct {
 type DellSoftwareComponent struct {
 	DateTime               time.Time                   `xml:"dateTime,attr,omitempty"`
 	DellVersion            string                      `xml:"dellVersion,attr"`
+	Hash                   string                      `xml:"hash,attr,omitempty"`
+	HashAlgorithm          string                      `xml:"hashAlgorithm,attr,omitempty"`
 	HashMD5                string                      `xml:"hashMD5,attr,omitempty"`
 	PackageID              string                      `xml:"packageID,attr"`
 	PackageType            string                      `xml:"packageType,attr"`

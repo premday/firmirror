@@ -4,16 +4,50 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+var (
+	componentTag = regexp.MustCompile(`<SoftwareComponent [^>]*>`)
+	pathAttr     = regexp.MustCompile(` path="[^"]*/([^"/]*)"`)
+	digestAttrs  = regexp.MustCompile(` (hashMD5|size|hash)="[^"]*"`)
+)
+
+// mockContent is what the mock sites serve for a firmware file.
+func mockContent(filename string) string {
+	return "Mock Dell firmware content for " + filename
+}
+
+// testCatalog reads the test catalog with the size and digests of each
+// component set to those of the content the mock sites serve for it.
+func testCatalog(t *testing.T) []byte {
+	catalog, err := os.ReadFile(filepath.Join("testdata", "catalog.xml"))
+	assert.NoError(t, err, "Should be able to read test catalog")
+	return componentTag.ReplaceAllFunc(catalog, func(tag []byte) []byte {
+		match := pathAttr.FindSubmatch(tag)
+		if match == nil {
+			return tag
+		}
+		content := []byte(mockContent(string(match[1])))
+		md5Sum, sha256Sum := md5.Sum(content), sha256.Sum256(content)
+		tag = digestAttrs.ReplaceAll(tag, nil)
+		return bytes.Replace(tag, []byte(" path="), fmt.Appendf(nil, ` hashMD5="%s" size="%d" hash="%s" path=`,
+			hex.EncodeToString(md5Sum[:]), len(content), hex.EncodeToString(sha256Sum[:])), 1)
+	})
+}
 
 // mockMirror lays out a copy of the Dell download site on disk, the way an
 // rsync mirror of it holds it, and returns the directory the catalog sits in.
@@ -21,9 +55,7 @@ func mockMirror(t *testing.T) string {
 	mirror := t.TempDir()
 	assert.NoError(t, os.MkdirAll(filepath.Join(mirror, "catalog"), 0755), "Should be able to create the mirror")
 
-	catalog, err := os.ReadFile(filepath.Join("testdata", "catalog.xml"))
-	assert.NoError(t, err, "Should be able to read test catalog")
-	encoded := utf16LE(catalog)
+	encoded := utf16LE(testCatalog(t))
 
 	catalogFile, err := os.Create(filepath.Join(mirror, "catalog", "catalog.xml.gz"))
 	assert.NoError(t, err, "Should be able to create the mirrored catalog")
@@ -40,8 +72,7 @@ func mockMirror(t *testing.T) string {
 	for _, component := range parsed.SoftwareComponents {
 		path := filepath.Join(mirror, filepath.FromSlash(component.Path))
 		assert.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
-		content := "Mock Dell firmware content for " + filepath.Base(component.Path)
-		assert.NoError(t, os.WriteFile(path, []byte(content), 0644))
+		assert.NoError(t, os.WriteFile(path, []byte(mockContent(filepath.Base(component.Path))), 0644))
 	}
 
 	return mirror
@@ -63,15 +94,8 @@ func mockServer(t *testing.T) *httptest.Server {
 
 	// Serve the test catalog XML (gzipped)
 	mux.HandleFunc("/catalog/catalog.xml.gz", func(w http.ResponseWriter, r *http.Request) {
-		catalogPath := filepath.Join("testdata", "catalog.xml")
-		content, err := os.ReadFile(catalogPath)
-		if !assert.NoError(t, err, "Should be able to read test catalog") {
-			http.Error(w, "Test catalog not found", http.StatusNotFound)
-			return
-		}
-
 		// Convert to UTF-16 Little Endian with BOM as expected by Dell's parser
-		utf16Content := utf16LE(content)
+		utf16Content := utf16LE(testCatalog(t))
 
 		// Serve as gzipped content
 		w.Header().Set("Content-Type", "application/x-gzip")
@@ -79,7 +103,7 @@ func mockServer(t *testing.T) *httptest.Server {
 		gzipWriter := gzip.NewWriter(w)
 		defer gzipWriter.Close()
 
-		_, err = gzipWriter.Write(utf16Content)
+		_, err := gzipWriter.Write(utf16Content)
 		if !assert.NoError(t, err, "Should be able to gzip catalog content") {
 			return
 		}
@@ -97,8 +121,7 @@ func mockServer(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 
 		// Return mock firmware content
-		mockContent := "Mock Dell firmware content for " + filename
-		w.Write([]byte(mockContent))
+		w.Write([]byte(mockContent(filename)))
 	})
 
 	return httptest.NewServer(mux)
@@ -627,4 +650,44 @@ func mustParseTime(timeStr string) time.Time {
 func TestUnixTime(t *testing.T) {
 	assert.Equal(t, int64(0), unixTime(time.Time{}), "a catalog with no date gives no timestamp, not a negative one")
 	assert.Equal(t, int64(1593714054), unixTime(time.Date(2020, 7, 2, 18, 20, 54, 0, time.UTC)))
+}
+
+func TestDellVendor_RetrieveFirmwareVerifiesDownload(t *testing.T) {
+	server := mockServer(t)
+	defer server.Close()
+	vendor := &DellVendor{BaseURL: server.URL}
+
+	content := []byte(mockContent("firmware1.exe"))
+	sha256Sum, md5Sum := sha256.Sum256(content), md5.Sum(content)
+	good := DellSoftwareComponent{
+		Path:          "FOLDER01/firmware1.exe",
+		Hash:          hex.EncodeToString(sha256Sum[:]),
+		HashAlgorithm: "SHA256",
+		HashMD5:       hex.EncodeToString(md5Sum[:]),
+		Size:          int64(len(content)),
+	}
+
+	tests := map[string]func(*DellSoftwareComponent){
+		"Valid":          func(*DellSoftwareComponent) {},
+		"ValidMD5Only":   func(c *DellSoftwareComponent) { c.Hash, c.HashAlgorithm = "", "" },
+		"NoDigest":       func(c *DellSoftwareComponent) { c.Hash, c.HashAlgorithm, c.HashMD5, c.Size = "", "", "", 0 },
+		"SHA256Mismatch": func(c *DellSoftwareComponent) { c.Hash = hex.EncodeToString(make([]byte, sha256.Size)) },
+		"MD5Mismatch":    func(c *DellSoftwareComponent) { c.Hash, c.HashMD5 = "", hex.EncodeToString(make([]byte, md5.Size)) },
+		"SizeMismatch":   func(c *DellSoftwareComponent) { c.Size++ },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			component := good
+			mutate(&component)
+			tmpDir := t.TempDir()
+			err := vendor.RetrieveFirmware(context.Background(), &DellFirmwareEntry{Filename: "firmware1.exe", DellSoftwareComponent: &component}, tmpDir)
+			if name == "Valid" || name == "ValidMD5Only" || name == "NoDigest" {
+				assert.NoError(t, err)
+				assert.FileExists(t, filepath.Join(tmpDir, "firmware1.exe"))
+				return
+			}
+			assert.Error(t, err, "A download the catalog does not vouch for should fail")
+			assert.NoFileExists(t, filepath.Join(tmpDir, "firmware1.exe"), "A rejected download should not be left behind")
+		})
+	}
 }
