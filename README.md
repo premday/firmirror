@@ -196,6 +196,9 @@ components:
     platform: 3a8f2c91e07b45d6        # a digest of the GUIDs: it tells platforms of one ID apart
     name: Example NIC                 # for whoever reads the file
     versions: {dev: "2.90", beta: "2.80", preview: "2.80", stable: "2.80"}
+  - id: com.example.old-nic
+    hold: true                        # optional: served by no ring, and left alone by promotions
+    versions: {dev: "2.10"}
 ```
 
 - `firmirror bkc promote dev --bkc.file bkc.yml --metadata <published metadata>` creates the file or moves
@@ -211,7 +214,8 @@ components:
   `--component` narrows it to some component IDs. `--prune` also removes the entries of components the
   mirror no longer has (not together with `--component`), and refuses to remove more than half of the file
   unless `--allow-mass-prune` says so, as a mirror that is partial or of another environment would.
-  Not promoting a component is how it is held.
+  Not promoting a component keeps its ring where it is, and `hold: true` on its entry keeps it out of every
+  ring (see below).
 - `firmirror refresh --bkc.file <path or URL>` tags the releases it publishes as the file says. Newer
   firmware that the file does not name is served by no ring until it is promoted into `dev`. A refresh that
   cannot read the file fails, as it cannot publish rings without it, and reads it again just before it
@@ -221,10 +225,10 @@ components:
   for the next refresh, or `regen-metadata`.
   Without `--bkc.file` it publishes no ring tag at all. It refuses to publish a document that lacks a ring
   tag the stored one has, as a forgotten or stale file, another tag prefix or a ring removed from the file
-  would take the hosts on that ring off it. A ring still counts when some entry names a version for it,
-  whatever the mirror holds: its hosts then stay where they are. It says so before it mirrors anything, and
-  likewise refuses, before it mirrors anything, to take a signed JCAT off for want of signing keys, as
-  one that cannot be read may be signed: `--force` says that is the point of the tags, and
+  would take the hosts on that ring off it. A ring still counts when some entry that is not held names a
+  version for it, whatever the mirror holds: its hosts then stay where they are. It says so before it
+  mirrors anything, and likewise refuses, before it mirrors anything, to take a signed JCAT off for want of
+  signing keys, as one that cannot be read may be signed: `--force` says that is the point of the tags, and
   `--stop-signing` of not signing any more. It likewise refuses to take the base URL out of the locations of what is
   published, as a forgotten `--firmware-base-url` would: `--drop-base-url` says that is the point. The
   file is a trusted input, as it decides what every host is served: it is read over HTTPS, a plain HTTP
@@ -242,7 +246,7 @@ components:
   ending between the JCAT and the metadata would leave one that is not the other's, and ends at the second.
   It fails, and publishes nothing, if
   the metadata was published while it ran.
-- `firmirror bkc status` shows what each ring serves, from the file.
+- `firmirror bkc status` shows what each ring serves, from the file. An entry that is held shows `held`.
 
 The Helm chart reads the file from `bkc.url`, and has a suspended CronJob that starts `regen-metadata`, see
 its README.
@@ -263,8 +267,32 @@ Things to know:
   releases are served by different rings is published as several components of the same ID and GUIDs,
   one per set of tags. fwupd merges the releases of every component matching a device.
 - Rings work per component, an ID and its GUIDs. fwupd resolves a device across every component
-  providing its GUID, and `fwupdmgr sync` takes the newest tagged release among them, so a device whose
-  GUID two components provide can be moved by the other one. Several Dell platforms share GUIDs this way.
+  providing its GUID, and `fwupdmgr sync` takes the first tagged release of what fwupd lists for it, which
+  is sorted by branch, then by version, newest first. A device whose GUID two components provide can
+  therefore be moved by the other one, and a ring that moves one of them back does not move a device the
+  other one's newer release also serves. Several Dell and HPE platforms share GUIDs this way. The refresh
+  and `regen-metadata` log each pair of components served different releases once, for the rings that
+  serve the same two, with the ID and platform of each, how many GUIDs they share and how many only one has.
+  When one provides every GUID of the other, it is only a matter of which version a device is given. When each
+  has GUIDs of its own, the GUIDs a device matches decide: those are the ones to look at, and the log names
+  the first of the GUIDs only one has. It keeps at most 10,000 pairs per ring and looks at no more than
+  twenty million, which the log says: the pairs it lists are then not all.
+- `hold: true` on an entry keeps the component out of every ring, whatever its versions say, and out of
+  promotions, which leave the entry as it is and say so when `--component` names it. It is for a
+  component another one makes redundant, such as an older package of a device that the other also updates,
+  so that no ring serves it. An entry with a platform holds that component only. One without a platform
+  stands for the components of its ID that have no entry of their own, and holds them all: none is
+  promoted, nor given an entry, and `promote` names the first of them. `--prune` keeps it while the mirror
+  has a component of its ID, and removes an entry with a platform with its component. A vendor adding a
+  GUID to a held package changes its platform: the mirror then has the package under the new one, which
+  has no entry, and is served once `promote` makes one, which `--prune` does with the entry of the old
+  platform. `promote` warns of an entry it makes under an ID that has a held entry, so that the package
+  can be held by its new platform.
+  `bkc status` shows a held entry as `held`, with the version it would serve in parentheses, and the
+  refresh logs how many components are held. Taking the hold off serves the versions the entry names as
+  they are, which may be older than what the hosts run, so promote its rings again in the same change. A
+  firmirror from before `hold` refuses a file that has it, as it does any field of an entry it does not
+  know: deploy the one that reads it first.
 - A version the file names that is no longer mirrored leaves its ring serving nothing for that component,
   which the refresh logs, as it does the components the file has no entry for.
 - Two runs publishing at once can still replace one another's metadata: `concurrencyPolicy: Forbid` does

@@ -60,6 +60,24 @@ func (f *File) Upstream(ring string) (string, error) {
 	return f.Rings[index-1], nil
 }
 
+// heldIDs are the IDs that have a held entry. One without a platform stands for
+// the components of its ID that have no entry of their own, and holds them all:
+// the ID is held whole. One with a platform holds that component only, so another
+// platform of the ID is served as any other is.
+func (f *File) heldIDs() (whole, byPlatform map[string]struct{}) {
+	whole, byPlatform = make(map[string]struct{}), make(map[string]struct{})
+	for _, entry := range f.Components {
+		switch {
+		case !entry.Hold:
+		case entry.HoldsWhole():
+			whole[entry.ID] = struct{}{}
+		default:
+			byPlatform[entry.ID] = struct{}{}
+		}
+	}
+	return whole, byPlatform
+}
+
 func (f *File) entries() map[string]*Entry {
 	entries := make(map[string]*Entry, len(f.Components))
 	for i := range f.Components {
@@ -120,31 +138,230 @@ type Gap struct {
 	Version     string
 }
 
-// Overlap is a GUID shared by two components through which a ring serves two
-// releases: another version, or the same version of another package.
+// Overlap is a pair of components that provide some of the same GUIDs and are
+// served different releases by the rings it names: another version, or the same
+// version of another package. fwupd resolves a device across the components
+// providing its GUID, so it is given one of the two.
 type Overlap struct {
-	Ring, GUID            string
-	ComponentID, Version  string
-	OtherID, OtherVersion string
+	Rings []string
+	// The components are told apart by ID and platform, as an ID has several.
+	ComponentID, Platform                string
+	Version                              string
+	OtherID, OtherPlatform, OtherVersion string
+	// Shared counts the GUIDs both components provide, Only and OtherOnly those
+	// only one of them does. For the pairs that are logged, which are the first
+	// that each have GUIDs of their own, OnlyGUIDs and OtherOnlyGUIDs name the
+	// first of those: they tell which devices depend on which component.
+	Shared, Only, OtherOnly   int
+	OnlyGUIDs, OtherOnlyGUIDs []string
 }
 
-// servedRelease is what a ring serves of a component; the location tells two
-// packages of one version apart.
-type servedRelease struct{ id, version, location string }
+// Covered reports whether one component provides every GUID of the other. No
+// device then depends on which of the two it is given beyond the version, unlike
+// a pair that each have GUIDs of their own.
+func (o Overlap) Covered() bool {
+	return o.Only == 0 || o.OtherOnly == 0
+}
 
-// overlaps records the release served through each of the GUIDs, in served, and
-// returns those where another component already has the ring serve another
-// release.
-func overlaps(served map[string]servedRelease, component lvfs.Component, guids []string, ring string, release lvfs.Release) []Overlap {
-	var found []Overlap
+// overlapBounds bound the pairing of the components, as vendors share hundreds of
+// GUIDs between platforms and every pair of the components sharing one is a pair:
+// at most pairs of them are kept per ring, and visits looked at in all, the rings
+// together. A zero is the default.
+type overlapBounds struct{ pairs, visits int }
+
+const (
+	defaultOverlapPairs  = 10000
+	defaultOverlapVisits = 20_000_000
+)
+
+func (b overlapBounds) orDefault() overlapBounds {
+	return overlapBounds{pairs: cmp.Or(b.pairs, defaultOverlapPairs), visits: cmp.Or(b.visits, defaultOverlapVisits)}
+}
+
+// maxGUIDsNamed bounds the GUIDs only one component of a pair provides that are
+// named.
+const maxGUIDsNamed = 10
+
+// member is what overlaps needs to know of a mirrored component.
+type member struct {
+	id, platform string
+	guids        []string
+}
+
+// servedRelease is what a ring serves of a component, by its index among the
+// members; the location tells two packages of one version apart.
+type servedRelease struct {
+	component int
+	releaseOf
+}
+
+// releaseOf is what tells the releases a ring serves apart.
+type releaseOf struct{ version, location string }
+
+// overlapKey identifies a pair of components and the releases a ring serves of
+// them, so that the rings serving the same ones are reported together.
+type overlapKey struct{ first, second servedRelease }
+
+// overlaps pairs up the components a ring serves through a common GUID, and
+// returns the pairs it serves different releases of. served is by ring, in
+// the order of the members. Past its bounds it stops looking, which truncated
+// says: what it returns is then not all, and the rings of a pair may not be.
+func overlaps(members []member, rings []string, served map[string][]servedRelease, bounds overlapBounds) (found []Overlap, truncated bool) {
+	pairs := make(map[overlapKey]*Overlap)
+	visits := 0
+	groupOf := make(map[releaseOf]int)
+	for _, ring := range rings {
+		byGUID := make(map[string][]int) // the components served through each GUID, in order
+		release := make([]servedRelease, len(members))
+		for _, one := range served[ring] {
+			release[one.component] = one
+			for _, guid := range members[one.component].guids {
+				byGUID[guid] = append(byGUID[guid], one.component)
+			}
+		}
+		shared := make(map[[2]int]struct{})
+		// Only a GUID that several components are served through makes a pair, and in
+		// order, so that what is dropped past the bounds is the same every time.
+		var common []string
+		for guid, releases := range byGUID {
+			if len(releases) > 1 {
+				common = append(common, guid)
+			}
+		}
+		slices.Sort(common)
+	guids:
+		for _, guid := range common {
+			// The components served the same release are no pair: group them, in the
+			// order they come, and pair the groups, so that every visit is a pair.
+			var groups [][]int
+			clear(groupOf)
+			for _, component := range byGUID[guid] {
+				key := release[component].releaseOf
+				group, ok := groupOf[key]
+				if !ok {
+					group = len(groups)
+					groupOf[key] = group
+					groups = append(groups, nil)
+				}
+				groups[group] = append(groups[group], component)
+			}
+			for i, one := range groups {
+				for _, other := range groups[i+1:] {
+					for _, a := range one {
+						for _, b := range other {
+							if visits++; visits > bounds.visits {
+								truncated = true
+								break guids
+							}
+							pair := [2]int{min(a, b), max(a, b)}
+							if _, known := shared[pair]; known {
+								continue
+							}
+							if len(shared) >= bounds.pairs {
+								truncated = true
+								break guids
+							}
+							shared[pair] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+		for pair := range shared {
+			key := overlapKey{release[pair[0]], release[pair[1]]}
+			overlap, ok := pairs[key]
+			if !ok {
+				overlap = newOverlap(members, key)
+				pairs[key] = overlap
+			}
+			overlap.Rings = append(overlap.Rings, ring)
+		}
+	}
+
+	found = make([]Overlap, 0, len(pairs))
+	for _, overlap := range pairs {
+		found = append(found, *overlap)
+	}
+	slices.SortFunc(found, compareOverlaps)
+	// Only the pairs that are logged need their GUIDs named: the first maxLogged
+	// that each have GUIDs of their own, as LogTo logs them. The members are
+	// unique by ID and platform, as the components are pooled by key.
+	guidsOf := func(id, platform string) []string {
+		for _, one := range members {
+			if one.id == id && one.platform == platform {
+				return one.guids
+			}
+		}
+		return nil
+	}
+	named := 0
+	for i := range found {
+		if overlap := &found[i]; !overlap.Covered() && named < maxLogged {
+			first, second := guidsOf(overlap.ComponentID, overlap.Platform), guidsOf(overlap.OtherID, overlap.OtherPlatform)
+			overlap.OnlyGUIDs = firstNotIn(first, second, maxGUIDsNamed)
+			overlap.OtherOnlyGUIDs = firstNotIn(second, first, maxGUIDsNamed)
+			named++
+		}
+	}
+	return found, truncated
+}
+
+// compareOverlaps orders the pairs by their components, then their releases, then
+// their rings, so that no two compare equal unless they say the same.
+func compareOverlaps(a, b Overlap) int {
+	return cmp.Or(
+		strings.Compare(a.ComponentID, b.ComponentID),
+		strings.Compare(a.OtherID, b.OtherID),
+		strings.Compare(a.Platform, b.Platform),
+		strings.Compare(a.OtherPlatform, b.OtherPlatform),
+		strings.Compare(a.Version, b.Version),
+		strings.Compare(a.OtherVersion, b.OtherVersion),
+		slices.Compare(a.Rings, b.Rings),
+	)
+}
+
+func newOverlap(members []member, key overlapKey) *Overlap {
+	first, second := members[key.first.component], members[key.second.component]
+	shared := sharedGUIDs(first.guids, second.guids)
+	return &Overlap{
+		ComponentID: first.id, Platform: first.platform, Version: key.first.version,
+		OtherID: second.id, OtherPlatform: second.platform, OtherVersion: key.second.version,
+		Shared: shared, Only: len(first.guids) - shared, OtherOnly: len(second.guids) - shared,
+	}
+}
+
+// sharedGUIDs counts the GUIDs two sorted lists have in common.
+func sharedGUIDs(a, b []string) int {
+	shared := 0
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch c := strings.Compare(a[i], b[j]); {
+		case c < 0:
+			i++
+		case c > 0:
+			j++
+		default:
+			shared++
+			i++
+			j++
+		}
+	}
+	return shared
+}
+
+// firstNotIn returns the first limit of the GUIDs that are not in others. Both
+// are sorted, as lvfs.ComponentGUIDs returns them.
+func firstNotIn(guids, others []string, limit int) []string {
+	var found []string
+	j := 0
 	for _, guid := range guids {
-		slot := guid + "\n" + ring
-		other, ok := served[slot]
-		switch {
-		case !ok:
-			served[slot] = servedRelease{id: component.ID, version: release.Version, location: release.Location}
-		case other.version != release.Version || other.location != release.Location:
-			found = append(found, Overlap{Ring: ring, GUID: guid, ComponentID: component.ID, Version: release.Version, OtherID: other.id, OtherVersion: other.version})
+		if len(found) == limit {
+			break
+		}
+		for j < len(others) && others[j] < guid {
+			j++
+		}
+		if j == len(others) || others[j] != guid {
+			found = append(found, guid)
 		}
 	}
 	return found
@@ -178,42 +395,63 @@ type Report struct {
 	// Mismatched are the entries whose ID the mirror has but not their platform,
 	// as a hand-written entry may get it wrong: no ring serves them.
 	Mismatched []Entry
-	// Overlaps are rings serving different versions through a GUID shared by two
-	// components: fwupd merges the components matching a device, so hosts of one
-	// can be moved to a release of the other.
+	// OverlapsTruncated says Overlaps lacks pairs: there are more than were looked at
+	// or kept, as the pairing is bounded.
+	OverlapsTruncated bool
+	// Overlaps are the pairs of components that share GUIDs and are served
+	// different releases: fwupd merges the components matching a device, so hosts
+	// of one can be moved to a release of the other. Vendors share hundreds of
+	// GUIDs between platforms, so a pair is one entry, whatever the GUIDs.
 	Overlaps []Overlap
-	// OverlapCount is the total, as only the first are kept in Overlaps: vendors
-	// share hundreds of GUIDs between platforms.
-	OverlapCount int
-	// Unmanaged counts the mirrored components with no entry; no ring serves them
-	// until `bkc promote` adds them.
+	// Held counts the mirrored components that are held out of every ring: those
+	// of a held entry, and those with no entry of an ID whose held entry has no
+	// platform.
+	Held int
+	// Unmanaged counts the mirrored components with no entry, and no held entry
+	// without a platform for their ID; no ring serves them until `bkc promote`
+	// adds them.
 	Unmanaged int
 }
 
 // Apply tags the releases so that every ring serves what the file says. Tags are
 // written into the releases of components, so a caller passes releases it owns.
 func (f *File) Apply(components []lvfs.Component) *Report {
+	return f.apply(components, overlapBounds{})
+}
+
+// apply is Apply, pairing the components by the bounds given, which tests set.
+func (f *File) apply(components []lvfs.Component, bounds overlapBounds) *Report {
 	report := &Report{Tagged: make(map[string]int)}
 	entries := f.entries()
+	heldIDs, _ := f.heldIDs()
 	seen := make(map[string]struct{}, len(entries))
 	mirrored := make(map[string]struct{}, len(components))
-	served := make(map[string]servedRelease)
+	served := make(map[string][]servedRelease)
+	members := make([]member, len(components))
 
 	for i := range components {
 		component := &components[i]
 		mirrored[component.ID] = struct{}{}
 
 		guids := lvfs.ComponentGUIDs(*component)
-		key := entryKey(component.ID, digest(guids))
+		members[i] = member{id: component.ID, platform: digest(guids), guids: guids}
+		key := entryKey(component.ID, members[i].platform)
 		entry, managed := entries[key]
 		if !managed {
-			report.Unmanaged++
+			if _, held := heldIDs[component.ID]; held {
+				report.Held++
+			} else {
+				report.Unmanaged++
+			}
 			continue
 		}
 		seen[key] = struct{}{}
+		if entry.Hold {
+			report.Held++
+		}
 
 		for _, ring := range f.Rings {
-			version := entry.Versions[ring]
+			version := entry.Served(ring)
 			if version == "" {
 				continue
 			}
@@ -227,21 +465,22 @@ func (f *File) Apply(components []lvfs.Component) *Report {
 			if countVersion(component.Releases, version) > 1 {
 				report.Reissued = append(report.Reissued, Gap{Ring: ring, ComponentID: component.ID, Name: component.Name, Version: version})
 			}
-			for _, overlap := range overlaps(served, *component, guids, ring, component.Releases[index]) {
-				report.OverlapCount++
-				if len(report.Overlaps) < maxLogged {
-					report.Overlaps = append(report.Overlaps, overlap)
-				}
-			}
+			served[ring] = append(served[ring], servedRelease{component: i, releaseOf: releaseOf{version, component.Releases[index].Location}})
 		}
 	}
+	report.Overlaps, report.OverlapsTruncated = overlaps(members, f.Rings, served, bounds.orDefault())
 
 	for _, entry := range f.Components {
 		if _, ok := seen[entry.Key()]; ok {
 			continue
 		}
 		if _, ok := mirrored[entry.ID]; ok {
-			report.Mismatched = append(report.Mismatched, entry)
+			// A held entry without a platform holds its ID whole, whatever the
+			// components of it that have an entry. One with a platform that the mirror
+			// lacks may be a package that changed it.
+			if !entry.HoldsWhole() {
+				report.Mismatched = append(report.Mismatched, entry)
+			}
 		} else {
 			report.Unknown = append(report.Unknown, entry.ID)
 		}
@@ -266,15 +505,61 @@ func (r *Report) LogTo(logger *slog.Logger) {
 	logLimited(logger, r.Unknown, len(r.Unknown), "The definitions name components the mirror does not have", func(id string) []any {
 		return []any{"id", id}
 	})
-	logLimited(logger, r.Overlaps, r.OverlapCount, "Two components sharing a GUID are served different releases by one ring, and fwupd can move hosts from one to the other", func(o Overlap) []any {
-		return []any{"ring", o.Ring, "guid", o.GUID, "id", o.ComponentID, "version", o.Version, "other_id", o.OtherID, "other_version", o.OtherVersion}
-	})
+	partial, covered := splitOverlaps(r.Overlaps)
+	logLimited(logger, partial, len(partial), "Two components share GUIDs and each has GUIDs of its own, and they are served different releases, so a host is given one or the other by the GUIDs it matches", overlapAttrs)
+	logLimited(logger, covered, len(covered), "One component provides every GUID of another, and they are served different releases, so a host matching both is given one of them", overlapAttrs)
+	if r.OverlapsTruncated {
+		logger.Warn("There are more pairs of components served different releases through a GUID than were looked at or kept, so those listed are not all, and the rings of a pair may not be", "listed", len(r.Overlaps))
+	}
 	logLimited(logger, r.Mismatched, len(r.Mismatched), "The mirror has these components, but not with the platform of their entry in the definitions, so no ring serves them", func(entry Entry) []any {
-		return []any{"id", entry.ID, "platform", entry.Platform}
+		attrs := []any{"id", entry.ID, "platform", entry.Platform}
+		if entry.Hold {
+			// The package it holds may have changed its platform.
+			attrs = append(attrs, "hold", true)
+		}
+		return attrs
 	})
+	if r.Held > 0 {
+		logger.Info("Components held out of every ring, as the definitions say", "components", r.Held)
+	}
 	if r.Unmanaged > 0 {
 		logger.Info("Mirrored components that no ring serves, as the definitions have no entry for them", "components", r.Unmanaged)
 	}
+}
+
+// splitOverlaps separates the pairs that each have GUIDs of their own from those
+// where one component covers the other, keeping their order.
+func splitOverlaps(all []Overlap) (partial, covered []Overlap) {
+	for _, overlap := range all {
+		if overlap.Covered() {
+			covered = append(covered, overlap)
+		} else {
+			partial = append(partial, overlap)
+		}
+	}
+	return partial, covered
+}
+
+func overlapAttrs(o Overlap) []any {
+	attrs := []any{
+		"rings", strings.Join(o.Rings, ","),
+		"id", o.ComponentID, "platform", o.Platform, "version", o.Version,
+		"other_id", o.OtherID, "other_platform", o.OtherPlatform, "other_version", o.OtherVersion,
+		"shared", o.Shared, "only", o.Only, "other_only", o.OtherOnly,
+	}
+	if len(o.OnlyGUIDs) > 0 {
+		attrs = append(attrs, "only_guids", guidList(o.OnlyGUIDs, o.Only), "other_only_guids", guidList(o.OtherOnlyGUIDs, o.OtherOnly))
+	}
+	return attrs
+}
+
+// guidList joins the GUIDs kept of total, saying when it is not all of them.
+func guidList(kept []string, total int) string {
+	list := strings.Join(kept, ",")
+	if total > len(kept) {
+		list += ",..."
+	}
+	return list
 }
 
 // maxLogged bounds what LogTo logs of each kind: a stale file or shared GUIDs
