@@ -429,7 +429,7 @@ func TestFirmirrorSyncer_BuildPackage(t *testing.T) {
 		err := os.WriteFile(firmwareFile, []byte("test firmware"), 0644)
 		require.NoError(t, err, "Should create test firmware file")
 
-		require.NoError(t, syncer.buildPackage(context.TODO(), components, firmwareFilename, tmpDir))
+		require.NoError(t, syncer.buildPackage(context.TODO(), []Payload{{File: firmwareFilename, Components: components}}, firmwareFilename, tmpDir))
 
 		// Verify metainfo XML was created (named 0.metainfo.xml)
 		metainfoPath := filepath.Join(tmpDir, "0.metainfo.xml")
@@ -454,7 +454,7 @@ func TestFirmirrorSyncer_BuildPackageSizes(t *testing.T) {
 	}}
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "firmware.bin"), []byte("test firmware"), 0644))
 
-	require.NoError(t, syncer.buildPackage(context.TODO(), components, "firmware.bin", tmpDir))
+	require.NoError(t, syncer.buildPackage(context.TODO(), []Payload{{File: "firmware.bin", Components: components}}, "firmware.bin", tmpDir))
 
 	cab, err := os.Stat(filepath.Join(tmpDir, "firmware.bin.cab"))
 	require.NoError(t, err)

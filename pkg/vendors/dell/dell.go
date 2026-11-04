@@ -143,6 +143,46 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 		return fmt.Errorf("verifying Dell firmware %s: %w", fwPath, err)
 	}
 
+	// A DUP is an ELF or PE with a ZIP appended; a plain catalog payload is not.
+	zr, err := openDUP(filepath)
+	if err != nil {
+		// Not a DUP: the file is the payload itself.
+		return nil
+	}
+	defer zr.Close()
+
+	pkg, err := dupPackage(zr)
+	if err != nil {
+		return err
+	}
+
+	names, err := extractPayloads(zr, tmpDir)
+	if err != nil {
+		return err
+	}
+
+	// package.xml is authoritative for the componentID → payload mapping; the
+	// archive order is not.
+	byFile := make(map[string]DellDevice, len(pkg.SupportedDevices))
+	for _, dev := range pkg.SupportedDevices {
+		for _, img := range dev.Images {
+			byFile[img.Filename] = dev
+		}
+	}
+
+	for _, name := range names {
+		dev, ok := byFile[name]
+		if !ok {
+			return fmt.Errorf("DUP payload %s is not described by package.xml", name)
+		}
+		dellEntry.Payloads = append(dellEntry.Payloads, DellPayload{
+			File:        name,
+			ComponentID: dev.ComponentID,
+			PCIInfo:     dev.PCIInfo,
+		})
+	}
+	dellEntry.DUPPackage = pkg
+
 	return nil
 }
 
@@ -205,7 +245,122 @@ func (dfe *DellFirmwareEntry) GetSourceURL() string {
 }
 
 func (dfe *DellFirmwareEntry) ToAppstream() ([]lvfs.Component, error) {
+	if len(dfe.Payloads) > 0 {
+		return processDUPPackage(dfe)
+	}
 	return processFirmware(*dfe.DellSoftwareComponent)
+}
+
+// processDUPPackage emits one component per payload a DUP carries. Each payload
+// is a separate firmware image for a separate device, so each needs its own
+// component, its own PCI GUID and its own filename in the cabinet.
+func processDUPPackage(entry *DellFirmwareEntry) ([]lvfs.Component, error) {
+	pkg := entry.DUPPackage
+	if pkg == nil {
+		return nil, fmt.Errorf("DUP entry %s has payloads but no package.xml", entry.Filename)
+	}
+
+	fwName, err := getString(pkg.Name, "en")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get firmware name: %w", err)
+	}
+
+	description, err := getString(pkg.Description, "en")
+	if err != nil {
+		return nil, err
+	}
+
+	// Part of the component identity, see componentUUID.
+	systemIDs := supportedSystemIDs(DellSoftwareComponent{SupportedSystems: pkg.SupportedSystems})
+
+	devices := make(map[string]DellDevice, len(pkg.SupportedDevices))
+	for _, dev := range pkg.SupportedDevices {
+		devices[dev.ComponentID] = dev
+	}
+
+	var components []lvfs.Component
+	for _, payload := range entry.Payloads {
+		dev, ok := devices[payload.ComponentID]
+		if !ok {
+			return nil, fmt.Errorf("DUP payload %s names unknown componentID %s", payload.File, payload.ComponentID)
+		}
+
+		devName, err := getString(dev.DellTranslatable, "en")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get device name for component %s: %w", dev.ComponentID, err)
+		}
+
+		out := lvfs.Component{
+			Type:            "firmware",
+			MetadataLicense: "proprietary",
+			ProjectLicense:  "proprietary",
+			Name:            devName,
+			Summary:         fwName,
+			Description: lvfs.Description{
+				Value: "<p>" + html.EscapeString(description) + "</p>",
+			},
+			DeveloperName: "Dell",
+			ID:            fmt.Sprintf("com.dell.%s", componentUUID(dev.ComponentID, systemIDs)),
+			Categories:    []string{"X-Controller"},
+		}
+
+		// Provides: the PCI identity fwupd builds from the switch's PCI parent.
+		for _, pci := range payload.PCIInfo {
+			out.Provides = append(out.Provides, lvfs.Firmware{
+				Type: "flashed",
+				Text: pciGUID(pci),
+			})
+		}
+
+		out.Releases = append(out.Releases, lvfs.Release{
+			Version:     pkg.VendorVersion,
+			Date:        pkg.DateTime.Format(time.DateOnly),
+			Timestamp:   unixTime(pkg.DateTime),
+			Description: out.Description,
+			Urgency:     getUrgency(pkg.Criticality.Value),
+		})
+
+		out.Custom = append(out.Custom, lvfs.Custom{
+			Key:   "LVFS::UpdateProtocol",
+			Value: "com.dell.psb",
+		}, lvfs.Custom{
+			Key:   "LVFS::DeviceIntegrity",
+			Value: "signed",
+		})
+
+		components = append(components, out)
+	}
+
+	return components, nil
+}
+
+// CabinetPayloads pairs each DUP payload with the component processDUPPackage
+// emitted for it. The two are built in the same order, so they zip.
+func (dfe *DellFirmwareEntry) CabinetPayloads(components []*lvfs.Component) []firmirror.Payload {
+	if len(dfe.Payloads) == 0 {
+		return nil
+	}
+	if len(components) != len(dfe.Payloads) {
+		return nil
+	}
+
+	payloads := make([]firmirror.Payload, len(dfe.Payloads))
+	for i, p := range dfe.Payloads {
+		payloads[i] = firmirror.Payload{
+			File:       p.File,
+			Components: []*lvfs.Component{components[i]},
+		}
+	}
+	return payloads
+}
+
+// pciGUID is the GUID fwupd derives from a PCI instance ID, so the component
+// matches the device the switch exposes.
+func pciGUID(pci DellPCIInfo) string {
+	instanceID := fmt.Sprintf("PCI\\VEN_%s&DEV_%s&SUBSYS_%s%s",
+		strings.ToUpper(pci.VendorID), strings.ToUpper(pci.DeviceID),
+		strings.ToUpper(pci.SubVendorID), strings.ToUpper(pci.SubDeviceID))
+	return uuid.NewSHA1(uuid.NameSpaceDNS, []byte(instanceID)).String()
 }
 
 func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {

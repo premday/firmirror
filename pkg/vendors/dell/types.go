@@ -27,6 +27,18 @@ type DellFirmwareEntry struct {
 	Filename              string
 	DellSoftwareComponent *DellSoftwareComponent
 	SourceURL             string
+	// Payloads is set by RetrieveFirmware for a DUP, which carries one firmware
+	// image per supported device. Nil for a plain catalog payload.
+	Payloads []DellPayload
+	// DUPPackage is the DUP's own package.xml, set alongside Payloads.
+	DUPPackage *DellDUPPackage
+}
+
+// DellPayload is one firmware image a DUP carries, and the device it flashes.
+type DellPayload struct {
+	File        string // basename inside the work directory and inside the CAB
+	ComponentID string // from package.xml <Device componentID=…>
+	PCIInfo     []DellPCIInfo
 }
 
 // DellSoftwareComponent represents a software component like firmware or driver
@@ -106,9 +118,44 @@ type DellCriticality struct {
 type DellDevice struct {
 	ComponentID         string                  `xml:"componentID,attr"`
 	Embedded            string                  `xml:"embedded,attr"`
+	PCIInfo             []DellPCIInfo           `xml:"PCIInfo"`
 	Images              []DellImage             `xml:"PayloadConfiguration>Image"`
 	RollbackInformation DellRollbackInformation `xml:"RollbackInformation"`
 	DellTranslatable
+}
+
+// DellPCIInfo is the PCI identity a DUP device is matched on. fwupd builds the
+// same instance ID from the PCI parent, so the GUIDs line up.
+type DellPCIInfo struct {
+	DeviceID    string `xml:"deviceID,attr"`
+	VendorID    string `xml:"vendorID,attr"`
+	SubDeviceID string `xml:"subDeviceID,attr"`
+	SubVendorID string `xml:"subVendorID,attr"`
+}
+
+// DellDUPPackage is the package.xml a DUP carries. It is rooted at
+// <SoftwareComponent>, not <Manifest>, so DellCatalog cannot hold it.
+type DellDUPPackage struct {
+	XMLName          xml.Name                  `xml:"SoftwareComponent"`
+	PackageType      string                    `xml:"packageType,attr"`
+	VendorVersion    string                    `xml:"vendorVersion,attr"`
+	ReleaseID        string                    `xml:"releaseID,attr"`
+	DateTime         time.Time                 `xml:"dateTime,attr"`
+	RebootRequired   bool                      `xml:"rebootRequired,attr"`
+	Criticality      DellCriticality           `xml:"Criticality"`
+	Name             DellTranslatable          `xml:"Name"`
+	Description      DellTranslatable          `xml:"Description"`
+	LUCategory       DellTranslatableWithValue `xml:"LUCategory"`
+	SupportedDevices []DellDevice              `xml:"SupportedDevices>Device"`
+	SupportedSystems []DellBrand               `xml:"SupportedSystems>Brand"`
+	ImportantInfo    DellImportantInfo         `xml:"ImportantInfo"`
+}
+
+// DellImportantInfo is the DUP's ImportantInfo, which carries a URL the
+// catalog's DellTranslatable does not.
+type DellImportantInfo struct {
+	URL     string                  `xml:"URL,attr"`
+	Display []DellTranslatableEntry `xml:"Display"`
 }
 
 type DellRollbackInformation struct {

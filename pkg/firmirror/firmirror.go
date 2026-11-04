@@ -271,9 +271,18 @@ func (f *FirmirrorSyncer) processEntry(ctx context.Context, vendor Vendor, vendo
 		}
 	}
 
-	// Build a single package containing all component metainfo XMLs
+	// Build a single package containing all component metainfo XMLs. A DUP
+	// carries one firmware file per device, so it publishes several payloads in
+	// one cabinet; every other vendor publishes the one file it downloaded.
+	payloads := []Payload{{File: fwName, Components: componentPtrs}}
+	if pe, ok := entry.(PayloadEntry); ok {
+		if split := pe.CabinetPayloads(componentPtrs); len(split) > 0 {
+			payloads = split
+		}
+	}
+
 	t0 = time.Now()
-	if err = f.buildPackage(ctx, componentPtrs, fwName, tmpDir); err != nil {
+	if err = f.buildPackage(ctx, payloads, fwName, tmpDir); err != nil {
 		entryLogger.Error("Failed to build package", "error", err)
 		os.RemoveAll(tmpDir)
 		return nil
@@ -290,50 +299,65 @@ func (f *FirmirrorSyncer) processEntry(ctx context.Context, vendor Vendor, vendo
 	return result
 }
 
-func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.Component, fwFile, tmpDir string) error {
-	fwPath := filepath.Join(tmpDir, fwFile)
-	logger := slog.With("firmware", fwFile)
+func (f *FirmirrorSyncer) buildPackage(ctx context.Context, payloads []Payload, cabBase, tmpDir string) error {
+	logger := slog.With("firmware", cabBase)
 
-	payload, err := os.Stat(fwPath)
-	if err != nil {
-		return fmt.Errorf("sizing firmware: %w", err)
-	}
+	// Size and hash each payload once, and give its components the checksums
+	// that name it inside the cabinet.
+	var payloadPaths []string
+	for _, p := range payloads {
+		fwPath := filepath.Join(tmpDir, p.File)
 
-	// Calculate firmware checksums (shared by all components)
-	sha1Hash, sha256Hash, err := calculateChecksums(fwPath)
-	if err != nil {
-		return fmt.Errorf("calculating firmware checksums: %w", err)
-	}
-
-	// Write a metainfo XML per component, add firmware checksums to each
-	var metainfoPaths []string
-	for i, component := range components {
-		for j := range component.Releases {
-			component.Releases[j].Checksums = []lvfs.Checksum{
-				{Filename: fwFile, Target: "content", Type: "sha1", Value: sha1Hash},
-				{Filename: fwFile, Target: "content", Type: "sha256", Value: sha256Hash},
-			}
-			component.Releases[j].Sizes = []lvfs.Size{{Type: "installed", Bytes: payload.Size()}}
-		}
-
-		metaName := fmt.Sprintf("%d.metainfo.xml", i)
-		metaPath := filepath.Join(tmpDir, metaName)
-		outBytes := []byte(xml.Header)
-		xmlBytes, err := xml.MarshalIndent(component, "", "  ")
+		payload, err := os.Stat(fwPath)
 		if err != nil {
-			return fmt.Errorf("marshaling metainfo XML for component %s: %w", component.ID, err)
+			return fmt.Errorf("sizing firmware %s: %w", p.File, err)
 		}
-		outBytes = append(outBytes, xmlBytes...)
-		if err = os.WriteFile(metaPath, outBytes, 0644); err != nil {
-			return fmt.Errorf("writing metainfo XML %s: %w", metaName, err)
+
+		sha1Hash, sha256Hash, err := calculateChecksums(fwPath)
+		if err != nil {
+			return fmt.Errorf("calculating firmware checksums for %s: %w", p.File, err)
 		}
-		metainfoPaths = append(metainfoPaths, metaPath)
+
+		for _, component := range p.Components {
+			for j := range component.Releases {
+				component.Releases[j].Checksums = []lvfs.Checksum{
+					{Filename: p.File, Target: "content", Type: "sha1", Value: sha1Hash},
+					{Filename: p.File, Target: "content", Type: "sha256", Value: sha256Hash},
+				}
+				component.Releases[j].Sizes = []lvfs.Size{{Type: "installed", Bytes: payload.Size()}}
+			}
+		}
+
+		payloadPaths = append(payloadPaths, fwPath)
+	}
+
+	// Write a metainfo XML per component
+	var metainfoPaths []string
+	metaNum := 0
+	for _, p := range payloads {
+		for _, component := range p.Components {
+			metaName := fmt.Sprintf("%d.metainfo.xml", metaNum)
+			metaNum++
+			metaPath := filepath.Join(tmpDir, metaName)
+			outBytes := []byte(xml.Header)
+			xmlBytes, err := xml.MarshalIndent(component, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling metainfo XML for component %s: %w", component.ID, err)
+			}
+			outBytes = append(outBytes, xmlBytes...)
+			if err = os.WriteFile(metaPath, outBytes, 0644); err != nil {
+				return fmt.Errorf("writing metainfo XML %s: %w", metaName, err)
+			}
+			metainfoPaths = append(metainfoPaths, metaPath)
+		}
 	}
 
 	fwSig := filepath.Join(tmpDir, "firmware.jcat")
-	// sign payload
-	if err := f.signMetadata(ctx, fwSig, fwPath); err != nil {
-		return fmt.Errorf("signing firmware payload: %w", err)
+	// sign each payload
+	for _, fwPath := range payloadPaths {
+		if err := f.signMetadata(ctx, fwSig, fwPath); err != nil {
+			return fmt.Errorf("signing firmware payload %s: %w", filepath.Base(fwPath), err)
+		}
 	}
 	// sign each metainfo
 	for _, metaPath := range metainfoPaths {
@@ -342,17 +366,18 @@ func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.C
 		}
 	}
 
-	// Build CAB with firmware file, all metainfo XMLs, and jcat at the end
-	cabBaseName := fwFile + ".cab"
+	// Build CAB with every firmware file, all metainfo XMLs, and jcat at the end
+	cabBaseName := cabBase + ".cab"
 	cabPathInCache := filepath.Join(tmpDir, cabBaseName)
-	fwupdArgs := []string{"build-cabinet", cabPathInCache, fwPath}
+	fwupdArgs := []string{"build-cabinet", cabPathInCache}
+	fwupdArgs = append(fwupdArgs, payloadPaths...)
 	fwupdArgs = append(fwupdArgs, metainfoPaths...)
 	fwupdArgs = append(fwupdArgs, fwSig)
 	cmd := exec.CommandContext(ctx, "fwupdtool", fwupdArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Error("fwupdtool build-cabinet failed", "error", err, "output", string(out))
-		return fmt.Errorf("fwupdtool build-cabinet for %s: %w", fwFile, err)
+		return fmt.Errorf("fwupdtool build-cabinet for %s: %w", cabBase, err)
 	}
 
 	// Calculate CAB checksums (shared by all components)
@@ -366,21 +391,23 @@ func (f *FirmirrorSyncer) buildPackage(ctx context.Context, components []*lvfs.C
 		return fmt.Errorf("sizing CAB: %w", err)
 	}
 
-	cabName := cabSha256 + "-" + fwFile + ".cab"
+	cabName := cabSha256 + "-" + cabBase + ".cab"
 	// Add artifacts section to all components. The download size is only known
 	// now, so it is published but cannot be in the metainfo inside the CAB.
-	for _, component := range components {
-		for i := range component.Releases {
-			component.Releases[i].Sizes = append(component.Releases[i].Sizes, lvfs.Size{Type: "download", Bytes: cab.Size()})
-			component.Releases[i].Artifacts = []lvfs.Artifact{
-				{
-					Type:     "binary",
-					Location: cabName,
-					Checksums: []lvfs.Checksum{
-						{Type: "sha1", Value: cabSha1},
-						{Type: "sha256", Value: cabSha256},
+	for _, p := range payloads {
+		for _, component := range p.Components {
+			for i := range component.Releases {
+				component.Releases[i].Sizes = append(component.Releases[i].Sizes, lvfs.Size{Type: "download", Bytes: cab.Size()})
+				component.Releases[i].Artifacts = []lvfs.Artifact{
+					{
+						Type:     "binary",
+						Location: cabName,
+						Checksums: []lvfs.Checksum{
+							{Type: "sha1", Value: cabSha1},
+							{Type: "sha256", Value: cabSha256},
+						},
 					},
-				},
+				}
 			}
 		}
 	}

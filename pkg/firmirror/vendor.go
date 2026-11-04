@@ -31,3 +31,16 @@ type FirmwareEntry interface {
 	// A single firmware entry may produce multiple components (e.g. one per supported device).
 	ToAppstream() ([]lvfs.Component, error)
 }
+
+// Payload is one firmware file in a cabinet and the components that flash it.
+type Payload struct {
+	File       string
+	Components []*lvfs.Component
+}
+
+// PayloadEntry is a FirmwareEntry that publishes several firmware files in one
+// cabinet, each flashing a different device. components is what ToAppstream
+// returned for the same entry.
+type PayloadEntry interface {
+	CabinetPayloads(components []*lvfs.Component) []Payload
+}
