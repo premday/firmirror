@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/premday/firmirror/pkg/bkc"
+	"github.com/premday/firmirror/pkg/daemon"
 	"github.com/premday/firmirror/pkg/firmirror"
 	"github.com/premday/firmirror/pkg/vendors/dell"
 	"github.com/premday/firmirror/pkg/vendors/hpe"
@@ -17,6 +18,10 @@ import (
 type refreshRun struct {
 	overrides     Overrides
 	alwaysPublish bool // Publish, and sign, even a document that did not change
+	quietStop     bool // When told to end with nothing new, publish nothing: the daemon is stopping
+	// inUse are the rings a run falls back to when the ones it is given would be
+	// refused, as a bad commit must not stop the mirroring.
+	inUse *bkc.File
 	// beforePublish is called when the run is about to publish, after the signals
 	// it was told to end on are dealt with.
 	beforePublish func()
@@ -25,10 +30,24 @@ type refreshRun struct {
 // refreshOutcome is what a refresh did besides publishing.
 type refreshOutcome struct {
 	newComponents int
-	vendorsFailed bool // Some vendors failed to process, and what was mirrored was published
+	interrupted   bool      // The run was told to end, or timed out, before it processed every vendor
+	vendorsFailed bool      // Some vendors failed to process
+	holdsMetadata bool      // There is a document to publish: the stored one, or what the run mirrored
+	published     bool      // The store holds the document built with rings
+	fellBack      bool      // Other rings than the ones given were published, as those would be refused
+	rings         *bkc.File // The rollout rings the run ended up with
 }
 
-var errVendorsFailed = errors.New("one or more vendors failed to process")
+// retryable is an error a new run may get past, which the message does not say.
+type retryable struct{ error }
+
+func (retryable) Is(target error) bool { return target == daemon.ErrRetryable }
+
+var (
+	errVendorsFailed = retryable{errors.New("one or more vendors failed to process")}
+	errNotPublished  = retryable{errors.New("what this run mirrored was not published, as the store could not be checked or was published to meanwhile: it is mirrored again")}
+	errInterrupted   = errors.New("ended before every vendor was processed")
+)
 
 // checkRefreshArgs fails on what a refresh cannot run without.
 func checkRefreshArgs() error {
@@ -52,11 +71,12 @@ func runRefresh(ctx context.Context, stop func()) error {
 	if err := checkRefreshArgs(); err != nil {
 		return err
 	}
-	storage, err := openWritableStorage(ctx)
+	// Before the storage is opened, which removes the temporaries of a killed write.
+	definitions, err := loadDefinitions(ctx)
 	if err != nil {
 		return err
 	}
-	definitions, err := loadDefinitions(ctx)
+	storage, err := openWritableStorage(ctx)
 	if err != nil {
 		return err
 	}
@@ -73,6 +93,11 @@ func runRefresh(ctx context.Context, stop func()) error {
 	if outcome.vendorsFailed {
 		err = errors.Join(err, errVendorsFailed)
 	}
+	if outcome.interrupted {
+		// What was mirrored is published, but it is not all of a refresh: a Job that
+		// ended this way must not count as one that succeeded.
+		err = errors.Join(err, errInterrupted)
+	}
 	return err
 }
 
@@ -85,6 +110,7 @@ func refresh(ctx context.Context, storage firmirror.Storage, definitions *bkc.Fi
 	config.MaxConcurrency = args.Concurrency
 	config.CleanupUnreferencedPackages = args.S3.Cleanup
 	config.AlwaysPublish = run.alwaysPublish
+	config.InUseBKC = run.inUse
 	if args.BKC.File != "" {
 		// A promotion committed during a long run must not be reverted by the
 		// file the run started with.
@@ -119,15 +145,30 @@ func refresh(ctx context.Context, storage firmirror.Storage, definitions *bkc.Fi
 	}
 
 	defer func() {
+		// Before beforePublish, which ends the context. Not a timeout, which does not
+		// ask to stop starting anything.
+		told := errors.Is(ctx.Err(), context.Canceled)
 		if run.beforePublish != nil {
 			run.beforePublish()
 		}
-		slog.Info("Saving repository metadata")
-		if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
-			slog.Error("Failed to save metadata", "error", saveErr)
-			runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
+		// The daemon told to end with nothing new does not publish, and so does not
+		// sign the same document for every pod stopped meanwhile, nor read the rings or
+		// the bucket while it should be leaving. A refresh command still does, as it
+		// would have: it repairs, reads the rings again and cleans up.
+		if !(told && run.quietStop) || fm.GetNewComponentCount() > 0 {
+			slog.Info("Saving repository metadata")
+			if saveErr := fm.SaveMetadata(context.Background()); saveErr != nil {
+				slog.Error("Failed to save metadata", "error", saveErr)
+				runErr = errors.Join(runErr, fmt.Errorf("saving repository metadata: %w", saveErr))
+			}
+		} else {
+			slog.Info("Told to end with nothing new, not publishing")
 		}
 		outcome.newComponents = fm.GetNewComponentCount()
+		outcome.holdsMetadata = fm.HoldsMetadata()
+		outcome.rings = fm.Config.BKC
+		outcome.published = fm.Published()
+		outcome.fellBack = fm.FellBack() && fm.Published()
 	}()
 
 	slog.Info("Starting firmware processing", "vendors", len(fm.GetAllVendors()))
@@ -146,6 +187,8 @@ func refresh(ctx context.Context, storage firmirror.Storage, definitions *bkc.Fi
 		}
 	}
 
+	// A context that ended, whatever the vendor it ended in, cut the run short.
+	outcome.interrupted = ctx.Err() != nil
 	slog.Info("Firmware processing completed",
 		"duration", time.Since(startTime).Round(time.Second),
 		"new_components", fm.GetNewComponentCount(),

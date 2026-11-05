@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alecthomas/kong"
 
@@ -63,6 +64,15 @@ func (o Overrides) apply(config *firmirror.FirmirrorConfig) {
 	config.Force, config.StopSigning, config.DropBaseURL = o.Force, o.StopSigning, o.DropBaseURL
 }
 
+type DaemonFlags struct {
+	RefreshInterval time.Duration `help:"Time from the end of a refresh to the next one. The refresh at startup counts as the first." default:"24h"`
+	BKCPollInterval time.Duration `name:"bkc-poll-interval" help:"How often --bkc.file is read to see whether it changed: the only way to tell for a URL, and a safety net for a path, which is also watched for changes. A change publishes the metadata again, signed." default:"15m"`
+	RetryInterval   time.Duration `help:"Time from a refresh that failed or published with errors, or a failed regeneration, to its retry. It doubles each time the run fails again, up to --daemon.refresh-interval." default:"15m"`
+	RefreshTimeout  time.Duration `help:"Time after which a refresh is stopped, and what it mirrored published, as one that hangs holds up every publish after it. The refresh at startup mirrors everything and counts as one. 0 sets none." default:"12h"`
+	RegenTimeout    time.Duration `help:"Time after which a regeneration is stopped, and tried again. 0 sets none." default:"1h"`
+	MetricsAddress  string        `help:"Address to serve the Prometheus metrics (/metrics) and /healthz on. Empty serves none." default:":9090"`
+}
+
 var args struct {
 	DellFlags       `embed:"" prefix:"dell." group:"Dell" help:"Dell firmware fetching."`
 	HPEFlags        `embed:"" prefix:"hpe." group:"HPE" help:"HPE firmware fetching."`
@@ -80,6 +90,11 @@ var args struct {
 		Overrides `embed:""`
 	} `cmd:"" name:"regen-metadata" help:"Publish the stored metadata again, rendered with the current rollout rings and signed with the current keys, even if it did not change. Use it when the rings changed, or to sign with a new key."`
 
+	Daemon struct {
+		Overrides   `embed:""`
+		DaemonFlags `embed:"" prefix:"daemon." group:"Daemon" help:"Daemon configuration."`
+	} `cmd:"" help:"Run as an application instead of a job: refresh and publish the metadata at startup whether or not it changed, publish it again when --bkc.file changes, refresh every --daemon.refresh-interval, and export Prometheus metrics."`
+
 	Rollout struct {
 		Status struct {
 			Ring string `help:"Only report this ring." default:""`
@@ -93,7 +108,7 @@ var args struct {
 			AllowDowngrade bool     `help:"Allow a promotion that moves the ring backwards. fwupdmgr sync installs older releases too, so this downgrades the hosts on the ring." default:"false"`
 			Prune          bool     `help:"Also remove the entries of components the mirror no longer has. Not with --component." default:"false"`
 			AllowMassPrune bool     `help:"Let --prune remove more than half of the entries of the file, which a mirror that is partial or of another environment would." default:"false"`
-		} `cmd:"" help:"Move a ring on, in the file --bkc.file names, which is created if it does not exist. Nothing is published: the file is committed, and the next refresh or regen-metadata publishes it."`
+		} `cmd:"" help:"Move a ring on, in the file --bkc.file names, which is created if it does not exist. Nothing is published: the file is committed, and the next refresh or regen-metadata publishes it, or the daemon, which reads the file again."`
 	} `cmd:"" name:"bkc" help:"Inspect and promote the rollout rings."`
 }
 
@@ -125,6 +140,8 @@ func run(command string) error {
 		return runRefresh(ctx, stop)
 	case "regen-metadata":
 		return runRegenMetadata(ctx)
+	case "daemon":
+		return runDaemon(ctx)
 	case "bkc status":
 		return runBKCStatus(ctx)
 	case "bkc promote <ring>":
