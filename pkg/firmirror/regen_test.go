@@ -509,6 +509,35 @@ func TestADocumentWithNoRingTagAtAllIsRefusedWhenTheStoredHasSome(t *testing.T) 
 	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "no ring tag at all")
 }
 
+func TestRingsThatTagNothingFallBackToTheOnesInUse(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inUse := definitions("10.0", "10.0")
+	refresh(t, dir, inUse, versioned("10.0", "a.cab"))
+
+	// Every ring names a version, but of a platform the mirror does not have.
+	elsewhere := definitions("10.0", "10.0")
+	elsewhere.Components[0].Platform = bkc.Platform([]string{"another-guid"})
+	syncer := newRingsSyncer(t, dir, elsewhere)
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("10.0", "b.cab")}
+
+	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "no ring tag at all", "without rings to fall back to")
+
+	syncer.Config.InUseBKC = inUse
+	require.NoError(t, syncer.SaveMetadata(ctx))
+	assert.Same(t, inUse, syncer.Config.BKC, "what was published is the rings in use")
+	var published []string
+	for _, component := range readSavedMetadata(t, dir).Component {
+		if component.Tags != nil {
+			for _, tag := range component.Tags.Tag {
+				published = append(published, tag.Value)
+			}
+		}
+	}
+	assert.Contains(t, published, "firmirror-dev")
+}
+
 func TestDefinitionsReadAgainThatTagNothingTheMirrorHasAreNotUsed(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

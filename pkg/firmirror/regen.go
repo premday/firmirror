@@ -31,8 +31,8 @@ func ReadMetadata(ctx context.Context, source string, strict bool) ([]lvfs.Compo
 // DropBaseURL overrides it, Force does not.
 func (f *FirmirrorSyncer) baseURLDropped() error {
 	if f.facts.absolute && f.Config.FirmwareBaseURL == "" && !f.Config.DropBaseURL {
-		return errors.New("the stored metadata names its packages by URL under a base URL, and none is given (--firmware-base-url), " +
-			"which would name them by bare file name, as fwupd remotes that set FirmwareBaseURI reject: pass it, or drop it if that is the point")
+		return refuse(errors.New("the stored metadata names its packages by URL under a base URL, and none is given (--firmware-base-url), " +
+			"which would name them by bare file name, as fwupd remotes that set FirmwareBaseURI reject: pass it, or drop it if that is the point"))
 	}
 	return nil
 }
@@ -71,6 +71,8 @@ func (f *FirmirrorSyncer) regenerate(ctx context.Context, republish bool) error 
 		return errors.New("the metadata was published while it was regenerated, which would have replaced it with an older one: run it again")
 	case metadataUnverified:
 		return errors.New("could not check whether the metadata was published while it was regenerated, which would replace it with an older one: run it again")
+	case metadataUnchecked:
+		return errors.New("could not check the stored metadata, which a regeneration that changes nothing leaves alone: run it again")
 	case metadataUnchanged:
 		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
 		return nil
