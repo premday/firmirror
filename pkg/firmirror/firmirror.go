@@ -64,6 +64,7 @@ type FirmirrorSyncer struct {
 	vendors          map[string]Vendor
 	existingMetadata *lvfs.Components // Loaded metadata from existing metadata.xml.gz
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
+	published        bool             // The stored document is the one built with Config.BKC, as of SaveMetadata
 	newComponents    []lvfs.Component // Components accumulated during this run
 
 	facts    storedFacts // Of the document in storage, as of the last read or write
@@ -779,6 +780,20 @@ func (f *FirmirrorSyncer) fallBack(refused error, candidates ...*bkc.File) bool 
 	return false
 }
 
+// HoldsMetadata reports whether there is a document to publish: the stored one,
+// or what this run mirrored. Without one a run publishes nothing.
+func (f *FirmirrorSyncer) HoldsMetadata() bool {
+	return f.existingMetadata != nil || len(f.newComponents) > 0
+}
+
+// Published reports whether SaveMetadata left the stored document as the one built
+// with the definitions the run ended up with: it wrote it, or found it so already.
+func (f *FirmirrorSyncer) Published() bool { return f.published }
+
+// ErrCleanup is what a publish wraps when the metadata is in place but removing
+// the unreferenced firmware packages failed.
+var ErrCleanup = errors.New("failed to remove unreferenced firmware packages")
+
 // SaveMetadata saves the combined metadata (existing + accumulated) to metadata.xml.zst
 func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
@@ -786,7 +801,7 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 
 	// A run that mirrored nothing and holds no current document has nothing to
 	// publish, and must not replace whatever is stored with an empty one.
-	if f.existingMetadata == nil && len(f.newComponents) == 0 {
+	if !f.HoldsMetadata() {
 		logger.Info("No new component and no current metadata, skipping metadata update")
 		return nil
 	}
@@ -819,10 +834,12 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	}
 	switch outcome {
 	case metadataWritten:
+		f.published = true
 		logger.Info("Metadata saved successfully",
 			"total_merged_components", len(document.Component),
 			"new_components", len(f.newComponents))
 	case metadataUnchanged:
+		f.published = true
 		logger.Info("Published metadata is unchanged, skipping metadata update", "components", len(document.Component))
 	case metadataUnverified:
 		return errors.New("could not check whether the metadata was published meanwhile, so what this run changed is not published: run it again")
@@ -839,9 +856,9 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	// can be removed. A later no-op run retries any transient cleanup failures.
 	if err := f.removeUnreferencedPackages(ctx, document); err != nil {
 		if outcome == metadataWritten {
-			return fmt.Errorf("metadata saved but failed to remove unreferenced firmware packages: %w", err)
+			return fmt.Errorf("metadata saved but %w: %w", ErrCleanup, err)
 		}
-		return fmt.Errorf("failed to remove unreferenced firmware packages: %w", err)
+		return fmt.Errorf("%w: %w", ErrCleanup, err)
 	}
 
 	return nil
