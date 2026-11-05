@@ -49,6 +49,9 @@ type FirmirrorConfig struct {
 	// ReloadBKC reads the definitions again just before publishing, as a run can
 	// take hours. Nil keeps BKC as given.
 	ReloadBKC func(ctx context.Context) (*bkc.File, error)
+	// InUseBKC are the definitions to publish with when the ones the run has would
+	// stop publishing a ring tag, as a bad commit must not stop a mirror.
+	InUseBKC *bkc.File
 
 	// BKC defines what each rollout ring serves, and so the tags of the releases.
 	// Nil publishes no ring tag.
@@ -63,8 +66,9 @@ type FirmirrorSyncer struct {
 	existingIndex    map[string]bool  // Index of firmware already in metadata (by filename)
 	newComponents    []lvfs.Component // Components accumulated during this run
 
-	facts  storedFacts // Of the document in storage, as of the last read or write
-	stored fingerprint // Of the document in storage, as of the last time it was read or written
+	facts    storedFacts // Of the document in storage, as of the last read or write
+	stored   fingerprint // Of the document in storage, as of the last time it was read or written
+	fellBack bool        // The run publishes with other definitions than the file has, as those would be refused
 }
 
 // storedFacts is what a published document says of itself, read before its
@@ -567,8 +571,8 @@ func (f *FirmirrorSyncer) untagging() error {
 	}) {
 		hint = ", where a ring whose entries are all held serves nothing"
 	}
-	return fmt.Errorf("the stored metadata has ring tags that would no longer be published (%s, %d in all), which takes the hosts on those rings off them: "+
-		"check the rollout ring definitions (--bkc.file)%s, or force it if that is the point", strings.Join(shown, ", "), len(dropped), hint)
+	return refuseRings(fmt.Errorf("the stored metadata has ring tags that would no longer be published (%s, %d in all), which takes the hosts on those rings off them: "+
+		"check the rollout ring definitions (--bkc.file)%s, or force it if that is the point", strings.Join(shown, ", "), len(dropped), hint))
 }
 
 // noRingTag refuses a built document with no ring tag at all over a stored one
@@ -579,8 +583,8 @@ func (f *FirmirrorSyncer) noRingTag(published []string) error {
 	if f.Config.Force || f.existingMetadata == nil || len(f.facts.tags) == 0 || len(published) > 0 {
 		return nil
 	}
-	return errors.New("the document to publish has no ring tag at all, although the stored metadata has some: the definitions name nothing the mirror has, " +
-		"which takes every host off its ring: check the rollout ring definitions (--bkc.file), or force it if that is the point")
+	return refuseRings(errors.New("the document to publish has no ring tag at all, although the stored metadata has some: the definitions name nothing the mirror has, " +
+		"which takes every host off its ring: check the rollout ring definitions (--bkc.file), or force it if that is the point"))
 }
 
 // checkTags is what a built document must pass before it is published: no stored
@@ -624,8 +628,8 @@ func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
 		problem = fmt.Errorf("could not check whether the stored JCAT is signed, which publishing without signing keys would replace "+
 			"(delete it if it is cut short, and the run will replace it): %w", readErr)
 	case jcat != nil && jcat.isSigned():
-		problem = errors.New("the stored JCAT is signed, and without signing keys it would be replaced by one holding only checksums, " +
-			"which clients that require signed metadata reject: pass --sign.certificate and --sign.private-key, or --stop-signing to stop signing")
+		problem = refuse(errors.New("the stored JCAT is signed, and without signing keys it would be replaced by one holding only checksums, " +
+			"which clients that require signed metadata reject: pass --sign.certificate and --sign.private-key, or --stop-signing to stop signing"))
 	}
 	if problem != nil && f.Config.StopSigning {
 		slog.Warn("Publishing without signing keys over a signed JCAT, as asked to", "reason", problem)
@@ -640,6 +644,16 @@ func (f *FirmirrorSyncer) signatureKept(jcat *storedJCAT, readErr error) error {
 // these and also checks that the built document has some ring tag, which only it
 // can tell.
 func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
+	err := f.preflight(ctx)
+	if inUse := f.Config.InUseBKC; errors.Is(err, ErrRingsRefused) && inUse != nil && inUse != f.Config.BKC {
+		slog.Warn("The rollout rings would be refused, so this run goes on with the ones in use", "error", err)
+		f.Config.BKC, f.fellBack = inUse, true
+		err = f.preflight(ctx)
+	}
+	return err
+}
+
+func (f *FirmirrorSyncer) preflight(ctx context.Context) error {
 	if err := f.untagging(); err != nil {
 		return err
 	}
@@ -652,6 +666,11 @@ func (f *FirmirrorSyncer) Preflight(ctx context.Context) error {
 	}
 	return nil
 }
+
+// FellBack reports whether the run publishes with other definitions than the ones
+// the file has, because those would be refused: not when the ones read again
+// since are what it publishes with.
+func (f *FirmirrorSyncer) FellBack() bool { return f.fellBack }
 
 // reloadDefinitions swaps in the rollout ring definitions read again, within
 // bkc.ReadTimeout, and returns the ones it replaced, which are nil when the run
@@ -731,10 +750,33 @@ func (f *FirmirrorSyncer) noMetadata() error {
 	case f.existingMetadata != nil:
 		return nil
 	case f.stored.known():
-		return schemaError("the stored metadata", f.facts.schema, "run a refresh, which mirrors everything again")
+		return refuse(schemaError("the stored metadata", f.facts.schema, "run a refresh, which mirrors everything again"))
 	default:
-		return errors.New("there is no metadata: run a refresh first")
+		return refuse(errors.New("there is no metadata: run a refresh first"))
 	}
+}
+
+// fallBack sets, as the definitions to publish with, the first of the candidates
+// that passes the checks the ones refused did, and reports whether there is one.
+// With none, the definitions are left as they were, for the publish to refuse.
+func (f *FirmirrorSyncer) fallBack(refused error, candidates ...*bkc.File) bool {
+	original := f.Config.BKC
+	tried := map[*bkc.File]bool{original: true}
+	for _, candidate := range candidates {
+		if candidate == nil || tried[candidate] {
+			continue
+		}
+		tried[candidate] = true
+		slog.Warn("The rollout rings would stop publishing a ring tag, so this run tries others: run again with --force, or fix them, to publish them", "error", refused)
+		f.Config.BKC = candidate
+		document, _, _ := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+		if refused = f.checkTags(tagsOf(document)); refused == nil {
+			f.fellBack = true
+			return true
+		}
+	}
+	f.Config.BKC = original
+	return false
 }
 
 // SaveMetadata saves the combined metadata (existing + accumulated) to metadata.xml.zst
@@ -750,14 +792,16 @@ func (f *FirmirrorSyncer) SaveMetadata(ctx context.Context) error {
 	}
 
 	replaced, reloaded := f.reloadDefinitions(ctx)
-	document, supersededLocations, report := f.buildDocument(f.Config.CleanupUnreferencedPackages)
-	// The definitions read again must pass the checks the ones the run started
-	// with did; otherwise those are used.
 	if reloaded {
-		if err := f.checkTags(tagsOf(document)); err != nil {
-			logger.Warn("The rollout rings read again would stop publishing a ring tag, so this run publishes with the ones it started with: run again with --force, or fix them, to publish them",
-				"error", err)
-			f.Config.BKC = replaced
+		// What the file has now is judged afresh.
+		f.fellBack = false
+	}
+	document, supersededLocations, report := f.buildDocument(f.Config.CleanupUnreferencedPackages)
+	// The definitions must pass the checks the ones the run started with did, which
+	// those read again may not; otherwise the ones it started with are used, and then
+	// the ones in use.
+	if reloaded || f.Config.InUseBKC != nil {
+		if err := f.checkTags(tagsOf(document)); err != nil && f.fallBack(err, replaced, f.Config.InUseBKC) {
 			document, supersededLocations, report = f.buildDocument(f.Config.CleanupUnreferencedPackages)
 		}
 	}
