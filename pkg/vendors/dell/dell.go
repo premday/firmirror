@@ -170,16 +170,34 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 		}
 	}
 
+	// The catalog entry names the devices this mirror publishes. A DUP carries
+	// an image for every device it supports, so the rest are extracted and then
+	// dropped: publishing them would offer a machine a payload its catalog entry
+	// never listed.
+	wanted := make(map[string]bool, len(dellEntry.DellSoftwareComponent.SupportedDevices))
+	for _, dev := range dellEntry.DellSoftwareComponent.SupportedDevices {
+		wanted[dev.ComponentID] = true
+	}
+
 	for _, name := range names {
 		dev, ok := byFile[name]
 		if !ok {
 			return fmt.Errorf("DUP payload %s is not described by package.xml", name)
+		}
+		if !wanted[dev.ComponentID] {
+			if err := os.Remove(tmpDir + "/" + name); err != nil {
+				return fmt.Errorf("dropping unlisted DUP payload %s: %w", name, err)
+			}
+			continue
 		}
 		dellEntry.Payloads = append(dellEntry.Payloads, DellPayload{
 			File:        name,
 			ComponentID: dev.ComponentID,
 			PCIInfo:     dev.PCIInfo,
 		})
+	}
+	if len(dellEntry.Payloads) == 0 {
+		return fmt.Errorf("DUP %s carries no payload for the devices the catalog lists", dellEntry.Filename)
 	}
 	dellEntry.DUPPackage = pkg
 
