@@ -29,8 +29,12 @@ type DellManualFirmware struct {
 	SystemIDs []string `yaml:"system_ids"`
 	// ComponentIDs narrow which devices of the DUP are published, for a DUP
 	// that covers several systems. Empty publishes every device it carries.
-	ComponentIDs []string            `yaml:"component_ids"`
-	Versions     []DellManualVersion `yaml:"versions"`
+	ComponentIDs []string `yaml:"component_ids"`
+	// PCIInfo is the PCI identity the devices are matched on. Older DUPs leave
+	// it out of their package.xml, and without it no GUID is published, so the
+	// entry can name it here instead.
+	PCIInfo  []DellPCIInfo       `yaml:"pci_info"`
+	Versions []DellManualVersion `yaml:"versions"`
 }
 
 // DellManualVersion is one published build of a manual firmware.
@@ -168,6 +172,7 @@ func (dv *DellVendor) manualComponents() []DellSoftwareComponent {
 				Path:          version.URL,
 				ManualURL:     version.URL,
 				ManualDevices: entry.ComponentIDs,
+				ManualPCIInfo: entry.PCIInfo,
 				VendorVersion: version.Version,
 				PackageType:   "LLXP",
 				ComponentType: DellTranslatableWithValue{Value: "FRMW"},

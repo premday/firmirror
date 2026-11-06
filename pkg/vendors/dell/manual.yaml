@@ -5,21 +5,44 @@
 # The digest is the one the support site publishes for the file; it is checked
 # after the download, so a truncated or replaced file is refused.
 #
+# A version is a separate driver ID on the support site: the page for one ID
+# lists only that build, so older builds are found by their own ID. Every entry
+# here was checked to carry the same devices as the newest one.
+#
 # Read with --dell.manual, and only with --dell.enable.
 
 # Dell Product PowerEdge XE9680/XE8640/XE9640 PCIe Switch Firmware.
 # The PSB PCIe switch board of the XE9680, XE8640 and XE9640. Dell publishes
 # this DUP on the support site only: it is in none of the catalogs, so a
-# catalog-driven mirror never sees it. Driver ID PG2CN.
+# catalog-driven mirror never sees it.
 #
 # The DUP carries one image per switch, 14 in all, covering all three systems.
 # component_ids names the ones to publish; drop it to publish every device the
 # DUP carries. 113182 is the XE9680's first switch (PCI 1000:00B2, subsys 2330).
+#
+# Driver IDs, newest first: PG2CN 4.224.0.0, VN2RW 4.218.9.1, FGPJP 4.160.3.0.
+# All three carry componentIDs 113182…113291. XFCRJ (4.218.1.0) is the same
+# firmware but ships as a shell-script DUP rather than an ELF with a ZIP, which
+# this program cannot read, so it is left out.
 - name: Dell PowerEdge XE9680/XE8640/XE9640 PCIe Switch Firmware
   system_ids: ["0B73", "0B74", "0BBE"]
   component_ids: ["113182"]
+  # 4.160.3.0 leaves PCIInfo out of its package.xml, so the entry names it.
+  pci_info:
+    - device_id: "00B2"
+      vendor_id: "1000"
+      sub_device_id: "2330"
+      sub_vendor_id: "1028"
   versions:
     - version: "4.224.0.0"
       url: https://dl.dell.com/FOLDER14848575M/2/Firmware_PG2CN_LN64_4.224.0.0_A00_01.BIN
       sha256: 566694134318ae382d1521fc699c7c1b449f4d1d1462e51b87c8a3a88a0a8615
       size: 19167257
+    - version: "4.218.9.1"
+      url: https://dl.dell.com/FOLDER14170364M/1/Firmware_VN2RW_LN64_4.218.9.1_A00.BIN
+      sha256: 1073007563a0846b4873a335375b0021e787b4646164996338c3cd30173687e4
+      size: 17298908
+    - version: "4.160.3.0"
+      url: https://dl.dell.com/FOLDER12161943M/1/Firmware_FGPJP_LN64_4.160.3.0_A00.BIN
+      sha256: c066dc37dfdfe33670eba4bc6769c96231df83730040f5c38d6b50062bb2d367
+      size: 15529628

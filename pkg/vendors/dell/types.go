@@ -59,7 +59,10 @@ type DellSoftwareComponent struct {
 	ManualURL string `xml:"-"`
 	// ManualDevices narrows which devices of a manual DUP are published. Empty
 	// publishes every device the DUP carries.
-	ManualDevices          []string                    `xml:"-"`
+	ManualDevices []string `xml:"-"`
+	// ManualPCIInfo is the PCI identity a manual entry names, for a DUP whose
+	// package.xml leaves it out.
+	ManualPCIInfo          []DellPCIInfo               `xml:"-"`
 	RebootRequired         bool                        `xml:"rebootRequired,attr"`
 	ReleaseDate            string                      `xml:"releaseDate,attr,omitempty"`
 	ReleaseID              string                      `xml:"releaseID,attr,omitempty"`
@@ -136,10 +139,10 @@ type DellDevice struct {
 // DellPCIInfo is the PCI identity a DUP device is matched on. fwupd builds the
 // same instance ID from the PCI parent, so the GUIDs line up.
 type DellPCIInfo struct {
-	DeviceID    string `xml:"deviceID,attr"`
-	VendorID    string `xml:"vendorID,attr"`
-	SubDeviceID string `xml:"subDeviceID,attr"`
-	SubVendorID string `xml:"subVendorID,attr"`
+	DeviceID    string `xml:"deviceID,attr" yaml:"device_id"`
+	VendorID    string `xml:"vendorID,attr" yaml:"vendor_id"`
+	SubDeviceID string `xml:"subDeviceID,attr" yaml:"sub_device_id"`
+	SubVendorID string `xml:"subVendorID,attr" yaml:"sub_vendor_id"`
 }
 
 // DellDUPPackage is the package.xml a DUP carries. It is rooted at

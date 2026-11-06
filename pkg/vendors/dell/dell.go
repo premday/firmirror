@@ -217,10 +217,16 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 			}
 			continue
 		}
+		// Older DUPs leave PCIInfo out of package.xml, and without it no GUID
+		// is published; the manual entry can name it instead.
+		pciInfo := dev.PCIInfo
+		if len(pciInfo) == 0 {
+			pciInfo = dellEntry.DellSoftwareComponent.ManualPCIInfo
+		}
 		dellEntry.Payloads = append(dellEntry.Payloads, DellPayload{
 			File:        name,
 			ComponentID: dev.ComponentID,
-			PCIInfo:     dev.PCIInfo,
+			PCIInfo:     pciInfo,
 		})
 	}
 	if len(dellEntry.Payloads) == 0 {
@@ -320,8 +326,14 @@ func processDUPPackage(entry *DellFirmwareEntry) ([]lvfs.Component, error) {
 		return nil, err
 	}
 
-	// Part of the component identity, see componentUUID.
+	// Part of the component identity, see componentUUID. A manual entry names
+	// its own systems, and must use them: the DUP's package.xml varies between
+	// builds of the same firmware, which would split the versions across
+	// component IDs and publish them as separate devices.
 	systemIDs := supportedSystemIDs(DellSoftwareComponent{SupportedSystems: pkg.SupportedSystems})
+	if len(entry.DellSoftwareComponent.SupportedSystems) > 0 {
+		systemIDs = supportedSystemIDs(*entry.DellSoftwareComponent)
+	}
 
 	devices := make(map[string]DellDevice, len(pkg.SupportedDevices))
 	for _, dev := range pkg.SupportedDevices {

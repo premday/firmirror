@@ -35,10 +35,18 @@ func TestEmbeddedDatabaseIsLoaded(t *testing.T) {
 	require.NotNil(t, psb, "the PSB switch firmware is in the embedded database")
 	assert.Equal(t, []string{"0B73", "0B74", "0BBE"}, psb.SystemIDs)
 	assert.Equal(t, []string{"113182"}, psb.ComponentIDs)
-	require.Len(t, psb.Versions, 1)
+
+	// Every published build, newest first.
+	require.Len(t, psb.Versions, 3)
 	assert.Equal(t, "4.224.0.0", psb.Versions[0].Version)
 	assert.Equal(t, "566694134318ae382d1521fc699c7c1b449f4d1d1462e51b87c8a3a88a0a8615", psb.Versions[0].SHA256)
 	assert.Equal(t, int64(19167257), psb.Versions[0].Size)
+	assert.Equal(t, "4.218.9.1", psb.Versions[1].Version)
+	assert.Equal(t, "4.160.3.0", psb.Versions[2].Version)
+	for _, v := range psb.Versions {
+		assert.Len(t, v.SHA256, 64, "%s has a digest", v.Version)
+		assert.Positive(t, v.Size, "%s has a size", v.Version)
+	}
 }
 
 func TestManualFileAddsToTheEmbeddedDatabase(t *testing.T) {
