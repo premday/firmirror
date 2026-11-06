@@ -1,3 +1,4 @@
+{{- if not (include "firmirror.daemonEnabled" .) }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -15,3 +16,4 @@ spec:
         {{- include "firmirror.selectorLabels" . | nindent 8 }}
     spec:
       {{- include "firmirror.jobSpec" (dict "root" . "args" (include "firmirror.args" .) "backoffLimit" .Values.cronjob.backoffLimit "restartPolicy" .Values.cronjob.restartPolicy "ttl" (.Values.cronjob.ttlSecondsAfterFinished | default nil)) | nindent 6 }}
+{{- end }}

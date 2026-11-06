@@ -34,6 +34,30 @@ func TestRegenerateMetadataPublishesADocumentThatDidNotChange(t *testing.T) {
 		"a new signing key is no change of the document, and a refresh would leave it alone")
 }
 
+func TestRegenerateMetadataIfChangedLeavesADocumentThatDidNotChangeAlone(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	refresh(t, dir, definitions("10.0"), versioned("10.0", "a.cab"))
+
+	reload := func(rings *bkc.File) (*FirmirrorSyncer, *writeRecorder) {
+		syncer := newRingsSyncer(t, dir, rings)
+		recorder := &writeRecorder{Storage: syncer.Storage}
+		syncer.Storage = recorder
+		require.NoError(t, syncer.LoadMetadata(ctx))
+		return syncer, recorder
+	}
+
+	syncer, recorder := reload(definitions("10.0"))
+	require.NoError(t, syncer.RegenerateMetadataIfChanged(ctx))
+	assert.Empty(t, recorder.keys, "rendering the same document is no reason to sign it again")
+
+	moved := definitions("10.0")
+	moved.Components[0].Versions["beta"] = "10.0"
+	syncer, recorder = reload(moved)
+	require.NoError(t, syncer.RegenerateMetadataIfChanged(ctx))
+	assert.ElementsMatch(t, []string{"metadata.xml.zst.jcat", "metadata.xml.zst"}, recorder.keys, "new rings change the document")
+}
+
 func TestRegenerateMetadataSignsWithTheKeysItIsGiven(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -483,6 +507,35 @@ func TestADocumentWithNoRingTagAtAllIsRefusedWhenTheStoredHasSome(t *testing.T) 
 
 	assert.NoError(t, syncer.Preflight(ctx), "the rings could publish their tags, which only the built document tells")
 	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "no ring tag at all")
+}
+
+func TestRingsThatTagNothingFallBackToTheOnesInUse(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inUse := definitions("10.0", "10.0")
+	refresh(t, dir, inUse, versioned("10.0", "a.cab"))
+
+	// Every ring names a version, but of a platform the mirror does not have.
+	elsewhere := definitions("10.0", "10.0")
+	elsewhere.Components[0].Platform = bkc.Platform([]string{"another-guid"})
+	syncer := newRingsSyncer(t, dir, elsewhere)
+	require.NoError(t, syncer.LoadMetadata(ctx))
+	syncer.newComponents = []lvfs.Component{versioned("10.0", "b.cab")}
+
+	assert.ErrorContains(t, syncer.SaveMetadata(ctx), "no ring tag at all", "without rings to fall back to")
+
+	syncer.Config.InUseBKC = inUse
+	require.NoError(t, syncer.SaveMetadata(ctx))
+	assert.Same(t, inUse, syncer.Config.BKC, "what was published is the rings in use")
+	var published []string
+	for _, component := range readSavedMetadata(t, dir).Component {
+		if component.Tags != nil {
+			for _, tag := range component.Tags.Tag {
+				published = append(published, tag.Value)
+			}
+		}
+	}
+	assert.Contains(t, published, "firmirror-dev")
 }
 
 func TestDefinitionsReadAgainThatTagNothingTheMirrorHasAreNotUsed(t *testing.T) {
