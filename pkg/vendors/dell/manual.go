@@ -1,6 +1,7 @@
 package dell
 
 import (
+	_ "embed"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,6 +10,13 @@ import (
 
 	"go.yaml.in/yaml/v3"
 )
+
+// manualDatabase is the firmware Dell publishes only on the support site,
+// which no catalog lists. It ships with the program so a mirror picks these up
+// without being told about them; --dell.manual adds to it.
+//
+//go:embed manual.yaml
+var manualDatabase []byte
 
 // DellManualFirmware is one firmware no Dell catalog lists, fetched from the
 // URL the entry gives instead. Dell publishes some updates only on the support
@@ -37,30 +45,68 @@ type DellManualVersion struct {
 	Size int64 `yaml:"size"`
 }
 
-// LoadManual reads the manual firmware file. A missing path is not an error:
-// a mirror that lists none simply reads no manual firmware.
+// LoadManual returns the embedded database, then whatever the file at path
+// adds to it. A path that names no file is not an error: the embedded entries
+// are still published.
+//
+// An entry in the file replaces the embedded one of the same name, so a mirror
+// can pin a version, correct a digest, or drop a version the embedded entry
+// lists, without waiting for a release.
 func LoadManual(path string) ([]DellManualFirmware, error) {
+	entries, err := parseManual(manualDatabase, "embedded")
+	if err != nil {
+		return nil, err
+	}
+
 	if path == "" {
-		return nil, nil
+		return entries, nil
 	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading manual Dell firmware %s: %w", path, err)
 	}
+	added, err := parseManual(raw, path)
+	if err != nil {
+		return nil, err
+	}
 
+	return mergeManual(entries, added), nil
+}
+
+func parseManual(raw []byte, source string) ([]DellManualFirmware, error) {
 	var entries []DellManualFirmware
 	if err := yaml.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("parsing manual Dell firmware %s: %w", path, err)
+		return nil, fmt.Errorf("parsing manual Dell firmware %s: %w", source, err)
 	}
 
 	for i, entry := range entries {
 		if err := entry.validate(); err != nil {
-			return nil, fmt.Errorf("manual Dell firmware %s, entry %d: %w", path, i+1, err)
+			return nil, fmt.Errorf("manual Dell firmware %s, entry %d: %w", source, i+1, err)
 		}
 	}
 
 	return entries, nil
+}
+
+// mergeManual puts added after base, with an added entry replacing the base
+// entry of the same name. Order is kept so the published metadata is stable.
+func mergeManual(base, added []DellManualFirmware) []DellManualFirmware {
+	out := slices.Clone(base)
+	for _, entry := range added {
+		replaced := false
+		for i := range out {
+			if out[i].Name == entry.Name {
+				out[i] = entry
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 func (m DellManualFirmware) validate() error {

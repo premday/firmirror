@@ -1,25 +1,43 @@
 # Firmware Dell publishes only on the support site, which no catalog lists.
 #
+# The program already carries a database of these, so this file is only for
+# what you want to add or change. Read it with --dell.manual.
+#
+# An entry here replaces the built-in one of the same name, so you can pin a
+# version, correct a digest, or narrow the devices published, without waiting
+# for a release. An entry with a new name is added alongside the built-in ones.
+#
 # Each entry names the systems it applies to, so a run filtered to another
 # system does not download it, and gives the direct download of every version.
 # The digest is the one the support site publishes for the file; it is checked
 # after the download, so a truncated or replaced file is refused.
 #
-# Read with --dell.manual, and only with --dell.enable.
+# component_ids narrows which devices of the DUP are published. A DUP usually
+# carries one image per switch across several systems, so naming the ones you
+# want keeps the cabinet to the size of one image. Drop it to publish every
+# device the DUP carries.
 
-# Dell Product PowerEdge XE9680/XE8640/XE9640 PCIe Switch Firmware.
-# The PSB PCIe switch board of the XE9680, XE8640 and XE9640. Dell publishes
-# this DUP on the support site only: it is in none of the catalogs, so a
-# catalog-driven mirror never sees it. Driver ID PG2CN.
+# Example: a firmware the built-in database does not carry yet.
 #
-# The DUP carries one image per switch, 14 in all, covering all three systems.
-# component_ids names the ones to publish; drop it to publish every device the
-# DUP carries. 113182 is the XE9680's first switch (PCI 1000:00B2, subsys 2330).
-- name: Dell PowerEdge XE9680/XE8640/XE9640 PCIe Switch Firmware
-  system_ids: ["0B73", "0B74", "0BBE"]
-  component_ids: ["113182"]
-  versions:
-    - version: "4.224.0.0"
-      url: https://dl.dell.com/FOLDER14848575M/2/Firmware_PG2CN_LN64_4.224.0.0_A00_01.BIN
-      sha256: 566694134318ae382d1521fc699c7c1b449f4d1d1462e51b87c8a3a88a0a8615
-      size: 19167257
+# The XE9680L/XE9685L switch board. Driver ID 41XR4.
+#
+# - name: Dell PowerEdge XE9680L/XE9685L PCIe Switch Firmware
+#   system_ids: ["0CF2", "0D16", "0D17", "0D44"]
+#   component_ids: ["114217"]
+#   versions:
+#     - version: "4.218.5.0"
+#       url: https://dl.dell.com/FOLDER13443165M/1/Firmware_41XR4_LN64_4.218.5.0_A01.BIN
+#       sha256: 679dfe292e3a4008fd82605bbad7247fc15e6a0e22a395ab6a4a648b92a07305
+
+# Example: pin a built-in entry to a different version.
+#
+# Naming the built-in entry here replaces it, so this mirror serves the version
+# you name instead of the one the program ships with.
+#
+# - name: Dell PowerEdge XE9680/XE8640/XE9640 PCIe Switch Firmware
+#   system_ids: ["0B73", "0B74", "0BBE"]
+#   component_ids: ["113182"]
+#   versions:
+#     - version: "4.224.0.0"
+#       url: https://dl.dell.com/FOLDER14848575M/2/Firmware_PG2CN_LN64_4.224.0.0_A00_01.BIN
+#       sha256: 566694134318ae382d1521fc699c7c1b449f4d1d1462e51b87c8a3a88a0a8615
