@@ -22,6 +22,7 @@ type DellFlags struct {
 	Enable     bool     `help:"Enable Dell firmware fetching." default:"false"`
 	MachinesID []string `help:"List of machine IDs to fetch firmware for. They are composed of 4 characters in hexadecimal representing the machine type. For example: \"0C60\" for \"3168\" corresponding to the C6615 series of servers. You can also specify \"*\" to fetch all the firmware, but this may take a very long time."`
 	BaseURL    string   `help:"Read the catalog and the firmware from this copy of https://dl.dell.com instead of the site itself. It takes an HTTP(S) URL, a file:// URL, or a plain directory, so an rsync mirror can be read where it sits. The published metadata is unchanged: it points at the location the catalog itself names." default:"https://dl.dell.com"`
+	Manual     string   `help:"A YAML file of firmware no Dell catalog lists, each entry naming the systems it applies to and the direct download URL of every version. Dell publishes some updates only on the support site, so a catalog-driven mirror never sees them." type:"path"`
 }
 
 type HPEFlags struct {

@@ -68,7 +68,12 @@ func runRefresh(ctx context.Context, stop func()) (runErr error) {
 	}
 
 	if args.DellFlags.Enable {
+		manual, err := dell.LoadManual(args.DellFlags.Manual)
+		if err != nil {
+			return err
+		}
 		dellVendor := dell.NewDellVendor(args.DellFlags.MachinesID, args.DellFlags.BaseURL)
+		dellVendor.Manual = manual
 		fm.RegisterVendor("dell", dellVendor)
 	}
 

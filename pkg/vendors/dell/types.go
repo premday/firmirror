@@ -10,6 +10,9 @@ type DellVendor struct {
 	BaseURL string
 	// SystemIDs filters which system to include. If nil or empty, includes all systems. Example: ["0C60"]
 	SystemIDs []string
+	// Manual is firmware no Dell catalog lists, read from the file the run
+	// names. It is published alongside the catalog's own entries.
+	Manual []DellManualFirmware
 }
 
 // DellCatalog represents the catalog element of a Dell catalog
@@ -43,14 +46,20 @@ type DellPayload struct {
 
 // DellSoftwareComponent represents a software component like firmware or driver
 type DellSoftwareComponent struct {
-	DateTime               time.Time                   `xml:"dateTime,attr,omitempty"`
-	DellVersion            string                      `xml:"dellVersion,attr"`
-	Hash                   string                      `xml:"hash,attr,omitempty"`
-	HashAlgorithm          string                      `xml:"hashAlgorithm,attr,omitempty"`
-	HashMD5                string                      `xml:"hashMD5,attr,omitempty"`
-	PackageID              string                      `xml:"packageID,attr"`
-	PackageType            string                      `xml:"packageType,attr"`
-	Path                   string                      `xml:"path,attr"`
+	DateTime      time.Time `xml:"dateTime,attr,omitempty"`
+	DellVersion   string    `xml:"dellVersion,attr"`
+	Hash          string    `xml:"hash,attr,omitempty"`
+	HashAlgorithm string    `xml:"hashAlgorithm,attr,omitempty"`
+	HashMD5       string    `xml:"hashMD5,attr,omitempty"`
+	PackageID     string    `xml:"packageID,attr"`
+	PackageType   string    `xml:"packageType,attr"`
+	Path          string    `xml:"path,attr"`
+	// ManualURL is set for a firmware no catalog lists, whose Path is the
+	// direct download the manual file gives rather than a catalog-relative one.
+	ManualURL string `xml:"-"`
+	// ManualDevices narrows which devices of a manual DUP are published. Empty
+	// publishes every device the DUP carries.
+	ManualDevices          []string                    `xml:"-"`
 	RebootRequired         bool                        `xml:"rebootRequired,attr"`
 	ReleaseDate            string                      `xml:"releaseDate,attr,omitempty"`
 	ReleaseID              string                      `xml:"releaseID,attr,omitempty"`

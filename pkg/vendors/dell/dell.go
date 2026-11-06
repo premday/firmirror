@@ -121,6 +121,10 @@ func (dv *DellVendor) filterCatalog(catalog *DellCatalog) *DellCatalog {
 
 	filteredCatalog := *catalog // Copy the catalog
 	filteredCatalog.SoftwareComponents = filteredComponents
+
+	// Manual firmware is not in any catalog, so it is appended after the
+	// filter rather than through it: the file already names its systems.
+	filteredCatalog.SoftwareComponents = append(filteredCatalog.SoftwareComponents, dv.manualComponents()...)
 	return &filteredCatalog
 }
 
@@ -133,7 +137,13 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 	fwPath := dellEntry.DellSoftwareComponent.Path
 	filepath := filepath.Join(tmpDir, filepath.Base(fwPath))
 	if _, err := os.Stat(filepath); os.IsNotExist(err) {
-		if err := utils.DownloadFileToDest(ctx, dv.BaseURL+"/"+fwPath, filepath); err != nil {
+		// A manual entry names the file's own location; a catalog entry names
+		// a path relative to the site the catalog came from.
+		source := dv.BaseURL + "/" + fwPath
+		if dellEntry.DellSoftwareComponent.ManualURL != "" {
+			source = dellEntry.DellSoftwareComponent.ManualURL
+		}
+		if err := utils.DownloadFileToDest(ctx, source, filepath); err != nil {
 			return fmt.Errorf("downloading Dell firmware %s: %w", fwPath, err)
 		}
 	}
@@ -173,18 +183,35 @@ func (dv *DellVendor) RetrieveFirmware(ctx context.Context, entry firmirror.Firm
 	// The catalog entry names the devices this mirror publishes. A DUP carries
 	// an image for every device it supports, so the rest are extracted and then
 	// dropped: publishing them would offer a machine a payload its catalog entry
-	// never listed.
+	// never listed. A manual entry lists no device, so the DUP's own package.xml
+	// is what says which devices it covers.
 	wanted := make(map[string]bool, len(dellEntry.DellSoftwareComponent.SupportedDevices))
 	for _, dev := range dellEntry.DellSoftwareComponent.SupportedDevices {
 		wanted[dev.ComponentID] = true
 	}
+	// A manual entry names its devices itself, and may name none, in which case
+	// the DUP's own package.xml decides.
+	manual := dellEntry.DellSoftwareComponent.ManualURL != ""
+	if manual && len(dellEntry.DellSoftwareComponent.ManualDevices) > 0 {
+		wanted = make(map[string]bool, len(dellEntry.DellSoftwareComponent.ManualDevices))
+		for _, id := range dellEntry.DellSoftwareComponent.ManualDevices {
+			wanted[id] = true
+		}
+	}
+	manualUnfiltered := manual && len(dellEntry.DellSoftwareComponent.ManualDevices) == 0
 
 	for _, name := range names {
 		dev, ok := byFile[name]
 		if !ok {
-			return fmt.Errorf("DUP payload %s is not described by package.xml", name)
+			// Some DUPs carry payloads their package.xml does not describe, such
+			// as the accelerator packages. They are not ours to publish.
+			slog.Debug("Skipping DUP payload package.xml does not describe", "payload", name)
+			if err := os.Remove(tmpDir + "/" + name); err != nil {
+				return fmt.Errorf("dropping undescribed DUP payload %s: %w", name, err)
+			}
+			continue
 		}
-		if !wanted[dev.ComponentID] {
+		if !manualUnfiltered && !wanted[dev.ComponentID] {
 			if err := os.Remove(tmpDir + "/" + name); err != nil {
 				return fmt.Errorf("dropping unlisted DUP payload %s: %w", name, err)
 			}
@@ -243,12 +270,17 @@ func verifyDownload(path string, component *DellSoftwareComponent) error {
 func (dc *DellCatalog) ListEntries() []firmirror.FirmwareEntry {
 	entries := []firmirror.FirmwareEntry{}
 	for _, fw := range dc.SoftwareComponents {
+		// The catalog names the location Dell publishes on, which is
+		// where a host reading the mirror can read about the firmware.
+		// A manual entry already names its own location.
+		sourceURL := dc.BaseLocation + "/" + fw.Path
+		if fw.ManualURL != "" {
+			sourceURL = fw.ManualURL
+		}
 		entries = append(entries, &DellFirmwareEntry{
 			Filename:              filepath.Base(fw.Path),
 			DellSoftwareComponent: &fw,
-			// The catalog names the location Dell publishes on, which is
-			// where a host reading the mirror can read about the firmware.
-			SourceURL: dc.BaseLocation + "/" + fw.Path,
+			SourceURL:             sourceURL,
 		})
 	}
 	return entries
