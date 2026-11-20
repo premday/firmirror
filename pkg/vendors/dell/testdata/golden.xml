@@ -7,23 +7,41 @@
   <description><p>This package provides the Firmware update for Mellanox ConnectX-6 DX Adapters</p></description>
   <provides>
     <firmware type="flashed">05370b1a-1dcb-53e2-b31c-b7515f0419cb</firmware>
+    <firmware type="flashed">7363c5e5-c477-5201-a91e-8fa4c906b930</firmware>
     <firmware type="flashed">c6eadaf2-1f82-582d-b67d-977ff73ec6ec</firmware>
+    <firmware type="flashed">9725b0d8-91f8-517a-b84c-1d4f88ce2044</firmware>
     <firmware type="flashed">b1202641-5adf-550d-8922-7ea8d86151ef</firmware>
+    <firmware type="flashed">88b5729f-56c1-5fc8-a1ed-e4b88ee51263</firmware>
     <firmware type="flashed">5aa2d204-ed89-5610-9af5-52f23abe4820</firmware>
+    <firmware type="flashed">c6d15ea6-0cc7-5d8d-a72f-66b4fc6c53b0</firmware>
     <firmware type="flashed">525c605d-eaee-5d92-aa8e-ffb595b28270</firmware>
+    <firmware type="flashed">d7773252-aa3b-5f35-9200-c7e7bdf0adf7</firmware>
     <firmware type="flashed">29608ae6-51c0-5b9d-8ff5-528e1c762702</firmware>
+    <firmware type="flashed">04ca8738-d5ae-55cd-8294-49b721e20901</firmware>
     <firmware type="flashed">c74ae360-2551-5c7b-88e4-543d96ae4869</firmware>
+    <firmware type="flashed">be921dac-0e31-50c2-96c8-c9126c6f3241</firmware>
     <firmware type="flashed">761653e3-8411-52a7-8fb6-30d0b2fc45f3</firmware>
+    <firmware type="flashed">4c6437d6-24ca-55a0-a61b-1939cd1abe5d</firmware>
     <firmware type="flashed">8aad24d4-5777-5b5a-b734-b502f2c0701a</firmware>
+    <firmware type="flashed">83f63078-bc9f-5d9a-b257-b90dde30918f</firmware>
     <firmware type="flashed">71d73ad9-aadc-5161-8c5f-94e522c6310e</firmware>
+    <firmware type="flashed">3eeee613-605a-52ec-9367-f325a23dcea4</firmware>
     <firmware type="flashed">8467e751-e8e5-5570-b3c9-f277a3b8831c</firmware>
+    <firmware type="flashed">a5778cc6-6eb2-537b-b942-68019204c925</firmware>
     <firmware type="flashed">9e703f24-3eae-503d-bdd0-d209855ea5ee</firmware>
+    <firmware type="flashed">5c25edd3-5ffc-5455-8d03-67bf2f965d3b</firmware>
     <firmware type="flashed">64e5e502-c1ec-5288-a047-c2083182761a</firmware>
+    <firmware type="flashed">14184791-5aeb-513c-8370-76b5164669eb</firmware>
     <firmware type="flashed">c87231ec-6813-5de5-b0e3-5f746356f2e4</firmware>
+    <firmware type="flashed">16d688ff-20c7-5ec7-8b0a-5da8699d2e12</firmware>
     <firmware type="flashed">68b6a794-cf77-5645-a2a6-479a7cb664dd</firmware>
+    <firmware type="flashed">b667bbf4-8eb1-5b8b-ba0d-62e424a10b97</firmware>
     <firmware type="flashed">86a414e5-40b5-5753-ac2d-3bcbf79841e6</firmware>
+    <firmware type="flashed">29ab766d-8a8f-59f5-833b-1e8cdd94e8c1</firmware>
     <firmware type="flashed">5956602d-487b-5b28-b8c9-c76b328a96ff</firmware>
+    <firmware type="flashed">4f808d1b-0a9d-5f64-b22a-e200ea038703</firmware>
     <firmware type="flashed">df585eef-ff25-5d3c-a016-ac89b573dba8</firmware>
+    <firmware type="flashed">a6a16fc7-00e9-5a75-a679-44cd0dcaf77d</firmware>
   </provides>
   <url type=""></url>
   <metadata_license>proprietary</metadata_license>

@@ -108,7 +108,19 @@ type DellDevice struct {
 	Embedded            string                  `xml:"embedded,attr"`
 	Images              []DellImage             `xml:"PayloadConfiguration>Image"`
 	RollbackInformation DellRollbackInformation `xml:"RollbackInformation"`
+	// PCIInfo is the PCI identity of the device, which is what an iDRAC reports
+	// for a device whose SoftwareId says nothing, such as a disk.
+	PCIInfo []DellPCIInfo `xml:"PCIInfo"`
 	DellTranslatable
+}
+
+// DellPCIInfo is a PCI identity as the catalog gives it: four hexadecimal
+// numbers of four digits, all zero when the device has none.
+type DellPCIInfo struct {
+	VendorID    string `xml:"vendorID,attr"`
+	DeviceID    string `xml:"deviceID,attr"`
+	SubVendorID string `xml:"subVendorID,attr"`
+	SubDeviceID string `xml:"subDeviceID,attr"`
 }
 
 type DellRollbackInformation struct {

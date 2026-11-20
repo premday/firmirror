@@ -7,7 +7,9 @@ import "encoding/xml"
 // 2: component identity includes the systems a package applies to.
 // 3: releases carry their timestamp and their sizes, and Dell components their
 // vendor.
-const MetadataSchemaVersion = 3
+// 4: Dell components also provide the GUID of the PCI identity of their devices,
+// and none of a componentID of "0".
+const MetadataSchemaVersion = 4
 
 type Components struct {
 	XMLName       xml.Name    `xml:"components"`
