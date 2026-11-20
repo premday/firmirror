@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -273,10 +274,12 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 
 		// Provides: GUIDs for this specific device across all system IDs
 		for _, systemID := range systemIDs {
-			out.Provides = append(out.Provides, lvfs.Firmware{
-				Type: "flashed",
-				Text: uuid.NewSHA1(uuid.NameSpaceDNS, fmt.Appendf(nil, "REDFISH\\VENDOR_Dell&SYSTEMID_%s&SOFTWAREID_%s", systemID, dev.ComponentID)).String(),
-			})
+			for _, identity := range deviceIdentities(systemID, dev) {
+				out.Provides = append(out.Provides, lvfs.Firmware{
+					Type: "flashed",
+					Text: uuid.NewSHA1(uuid.NameSpaceDNS, []byte(identity)).String(),
+				})
+			}
 		}
 
 		out.Custom = append(out.Custom, rebootCustom...)
@@ -304,6 +307,42 @@ func processFirmware(fw DellSoftwareComponent) ([]lvfs.Component, error) {
 	}
 
 	return components, nil
+}
+
+// deviceIdentities are the instance IDs fwupd may know a device of a system by,
+// which it builds from what the iDRAC reports.
+//
+// By SoftwareId, which is the componentID the catalog gives the device. A disk
+// reports "0" instead, and fwupd ignores it, so a componentID of "0" is never
+// published: it would name every disk of the system.
+//
+// By PCI identity, which an iDRAC reports in DellSoftwareInventory as the
+// VendorID, DeviceID, SubVendorID and SubDeviceID of the device and the catalog
+// gives as its PCIInfo. fwupd builds nothing from an identity with a zero in it,
+// and neither does this.
+func deviceIdentities(systemID string, dev DellDevice) []string {
+	var identities []string
+	if dev.ComponentID != "" && dev.ComponentID != "0" {
+		identities = append(identities, fmt.Sprintf("REDFISH\\VENDOR_Dell&SYSTEMID_%s&SOFTWAREID_%s", systemID, dev.ComponentID))
+	}
+	for _, info := range dev.PCIInfo {
+		ids := make([]uint64, 0, 4)
+		for _, id := range []string{info.VendorID, info.DeviceID, info.SubVendorID, info.SubDeviceID} {
+			value, err := strconv.ParseUint(id, 16, 16)
+			if err != nil || value == 0 {
+				break
+			}
+			ids = append(ids, value)
+		}
+		if len(ids) != 4 {
+			continue
+		}
+		identity := fmt.Sprintf("REDFISH\\VENDOR_Dell&SYSTEMID_%s&VEN_%04X&DEV_%04X&SUBSYS_%04X%04X", systemID, ids[0], ids[1], ids[2], ids[3])
+		if !slices.Contains(identities, identity) {
+			identities = append(identities, identity)
+		}
+	}
+	return identities
 }
 
 // unixTime is the Unix time of a date the catalog gave, or 0 when it gave none.
