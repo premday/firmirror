@@ -1,6 +1,6 @@
 # Firmirror Helm Chart
 
-This Helm chart deploys Firmirror as a Kubernetes CronJob to periodically sync firmware from hardware vendor sources (Dell and HPE) and create an LVFS-compatible firmware repository.
+This Helm chart deploys Firmirror as a Kubernetes CronJob, or as a daemon (see [Daemon](#daemon)), to periodically sync firmware from hardware vendor sources (Dell and HPE) and create an LVFS-compatible firmware repository.
 
 ## Prerequisites
 
@@ -33,7 +33,18 @@ The following table lists the configurable parameters of the Firmirror chart and
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `schedule` | Cron schedule for the job | `"0 2 * * *"` (2 AM daily) |
+| `daemon.enabled` | Run `firmirror daemon` as a Deployment instead of the refresh and `regen-metadata` CronJobs, which then do not exist | `false` |
+| `daemon.refreshInterval` | Time from the end of a refresh to the next one | `24h` |
+| `daemon.bkcPollInterval` | How often `bkc.url` is read to see whether it changed | `15m` |
+| `daemon.retryInterval` | Time to the retry of a failed refresh or regeneration, doubled each time it fails again | `15m` |
+| `daemon.refreshTimeout` | Time after which a refresh is stopped, and what it mirrored published | `12h` |
+| `daemon.regenTimeout` | Time after which a regeneration is stopped, and tried again | `1h` |
+| `daemon.terminationGracePeriodSeconds` | Time to finish a publish on termination | `600` |
+| `daemon.extraArgs` | More arguments of the daemon, such as `--force` (it also gets `extraArgs`) | `[]` |
+| `daemon.metrics.port` | Port of `/metrics` and `/healthz` | `9090` |
+| `daemon.metrics.service.enabled` | A Service for the metrics | `false` |
+| `daemon.metrics.podMonitor.enabled` | A PodMonitor for the Prometheus Operator, with `interval` and `labels` | `false` |
+| `schedule` | Cron schedule for the job. Not used by the daemon | `"0 2 * * *"` (2 AM daily) |
 | `nameOverride` | Override the chart name | `""` |
 | `fullnameOverride` | Override the full release name | `""` |
 | `image.repository` | Container image repository | `ghcr.io/premday/firmirror` |
@@ -99,6 +110,30 @@ The following table lists the configurable parameters of the Firmirror chart and
 ## License
 
 See the main project repository for license information.
+
+## Daemon
+
+With `daemon.enabled=true` the chart creates one Deployment that runs `firmirror daemon`, and neither the
+refresh CronJob nor the `regen-metadata` one. It refreshes at startup and publishes the metadata signed
+whether or not it changed, publishes it again as soon as `bkc.url` changes (read every
+`daemon.bkcPollInterval`), refreshes every `daemon.refreshInterval`, and serves Prometheus metrics, see the
+main README. `schedule`, `cronjob.*` and `bkc.regen.*` are not used.
+
+It has one replica, and the Deployment is replaced only after the old pod stopped (`Recreate`), as the
+store has one writer. When switching from the CronJobs, upgrade the release with `daemon.enabled=true`, which
+removes them, let a Job that is running finish first, and do not start one in between: a Job and the daemon publishing at once can
+replace one another's metadata. A pod that is replaced during a long refresh publishes what it mirrored so
+far, and the next one mirrors the rest; with `persistence` or S3 nothing mirrored is lost, and with the
+default `emptyDir` everything is mirrored again.
+
+The daemon signs with the keys as the mounted Secret holds them, at each publish, and signs an unchanged
+document again only at startup: to publish with a new key without waiting for a change, restart the
+Deployment (`kubectl rollout restart`). The chart sets
+`--daemon.metrics-address` from `daemon.metrics.port`, which the probes use, so do not override it in
+`daemon.extraArgs`. A startup probe gives it five minutes to read its storage and the rings, and the pod is
+restarted past that. There is no liveness probe: `/healthz` answers for as long as the process runs, so it
+would detect nothing, and could restart the pod in the middle of a refresh whose work is lost until it is
+published.
 
 ## Rollout rings
 

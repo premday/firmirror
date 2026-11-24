@@ -1156,7 +1156,9 @@ func TestFirmirrorSyncer_SaveMetadata(t *testing.T) {
 			}},
 		}}
 
-		require.ErrorContains(t, syncer.SaveMetadata(context.Background()), "transient delete failure")
+		saveErr := syncer.SaveMetadata(context.Background())
+		require.ErrorContains(t, saveErr, "transient delete failure")
+		assert.ErrorIs(t, saveErr, ErrCleanup, "the metadata is in place, and what failed is the cleanup")
 		assert.FileExists(t, filepath.Join(tmpDir, "old-firmware.cab"))
 
 		retrySyncer, err := NewFirmirrorSyncer(FirmirrorConfig{

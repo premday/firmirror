@@ -22,7 +22,8 @@ This allows you to host your own firmware mirror that `fwupd` clients can consum
 - **Concurrent Downloads**: Configurable concurrency for downloading and processing firmware entries
 - **Pluggable Storage**: Local filesystem or S3 (including S3-compatible services like MinIO)
 - **Metadata Signing**: JCAT signatures with SHA256 checksums and optional PKCS#7 X.509 signatures
-- **Helm Chart**: Kubernetes CronJob deployment with S3/local storage support
+- **Daemon**: a process that keeps the metadata published, and publishes it again when the rollout rings change
+- **Helm Chart**: Kubernetes CronJob or daemon deployment with S3/local storage support
 
 ## Prerequisites
 
@@ -129,6 +130,13 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 | `--bkc.file` | What each rollout ring serves: a YAML file, or the HTTP(S) URL it is fetched from (plain HTTP needs `--bkc.allow-http`). A refresh tags the releases it publishes accordingly, and publishes no ring tag without it. `bkc promote` edits it, so it is a path there | (no ring) |
 | `--bkc.allow-http` | Also read the file, and the `--metadata` of `bkc promote`, from a plain HTTP URL, which whoever is on the way can change | `false` |
 | `--bkc.rings` | The rings of a file `bkc promote` creates, in promotion order | `dev,beta,preview,stable` |
+| **Daemon** | | |
+| `--daemon.refresh-interval` | Time from the end of a refresh to the next one. The refresh at startup counts as the first | `24h` |
+| `--daemon.bkc-poll-interval` | How often `--bkc.file` is read to see whether it changed | `15m` |
+| `--daemon.retry-interval` | Time to the retry of a refresh that failed or published with errors, or of a failed regeneration, doubled each time it fails again up to the refresh interval | `15m` |
+| `--daemon.refresh-timeout` | Time after which a refresh is stopped, and what it mirrored published, as one that hangs holds up every publish after it. The first refresh mirrors everything. `0` sets none | `12h` |
+| `--daemon.regen-timeout` | Time after which a regeneration is stopped, and tried again. `0` sets none | `1h` |
+| `--daemon.metrics-address` | Where to serve `/metrics` and `/healthz`. Empty serves none | `:9090` |
 
 ### Commands
 
@@ -136,6 +144,7 @@ Pre-built images are published to `ghcr.io/premday/firmirror` via CI.
 |---------|-------------|
 | `refresh` | Mirror the enabled vendors and publish the metadata |
 | `regen-metadata` | Publish the stored metadata again, rendered with the current rollout rings and signed with the current keys, even if it did not change |
+| `daemon` | Run as an application: refresh at startup and publish whether or not the metadata changed, publish it again when `--bkc.file` changes, refresh every `--daemon.refresh-interval`, serve Prometheus metrics. See [Daemon](#daemon) |
 | `bkc status [--ring R]` | Report which version each rollout ring serves for each component, from `--bkc.file` |
 | `bkc promote <ring>` | Move a ring on in the file `--bkc.file` names, which it creates if needed. Nothing is published |
 
@@ -248,8 +257,8 @@ components:
   the metadata was published while it ran.
 - `firmirror bkc status` shows what each ring serves, from the file. An entry that is held shows `held`.
 
-The Helm chart reads the file from `bkc.url`, and has a suspended CronJob that starts `regen-metadata`, see
-its README.
+The Helm chart reads the file from `bkc.url`, and has a suspended CronJob that starts `regen-metadata`, or
+runs the daemon, which publishes a change by itself, see its README.
 
 Things to know:
 
@@ -297,6 +306,71 @@ Things to know:
   which the refresh logs, as it does the components the file has no entry for.
 - Two runs publishing at once can still replace one another's metadata: `concurrencyPolicy: Forbid` does
   not stop a Job created by hand from a CronJob.
+
+### Daemon
+
+`firmirror daemon` does what the `refresh` and `regen-metadata` jobs do, in one process that keeps running,
+so that a promotion reaches the hosts without anyone starting a job. It takes the arguments of a refresh
+(vendors, storage, signing, `--firmware-base-url`, `--bkc.*`) and the overrides `--force`, `--stop-signing`
+and `--drop-base-url`, which apply to every run it does.
+
+- **At startup** it refreshes, and publishes the metadata, signed, even if it did not change: a refresh that
+  also does the work of `regen-metadata`, so the current rings and signing keys are always in what is
+  published after a restart. It exits with an error if it cannot: missing tools, unreadable rings, a
+  publish refused for lack of the signing keys, the ring tags or the base URL, or every vendor failing with
+  nothing in the store to serve, or the first publish failing (a storage error, say: the next pod
+  starts again). When it published but something failed (a vendor, or removing packages
+  with `--s3.cleanup`) it goes on, as exiting would sign the metadata again at every restart.
+- **When `--bkc.file` changes** it publishes the metadata again, rendered with the new rings and signed.
+  It reads them again when it runs, so it never publishes rings older than a refresh did, and it writes
+  nothing when the document it renders is the one stored. A publish that is refused, as one that would
+  drop a ring tag, is logged and not tried again until the rings change again; one refused for another
+  reason (no metadata yet, a signed JCAT and no keys) is tried again as a failure is.
+  A path is watched with inotify, through its directory, so replacing the file and the symlink swaps of a
+  volume made from a ConfigMap are seen. A URL is read every `--daemon.bkc-poll-interval`, which also
+  covers a path on a filesystem that does not report changes. A change is other rings: an event, or an
+  edit of a comment, that changes nothing they render publishes nothing. Rings that cannot be read or are
+  invalid, or that a publish would refuse (a ring removed, say), are not applied, and the ones in use, the
+  last published, stay in force, for a refresh too, so a bad commit does not stop the mirroring or roll the
+  hosts back; this is logged, and counted when the watcher reads them. Rings that are already refused when the daemon starts have no ones in use to fall back to, and the first refresh fails.
+- **Every `--daemon.refresh-interval`** it refreshes as `refresh` does, leaving an unchanged document
+  alone, so clients that compare the JCAT do not download the metadata again for nothing.
+- A refresh and a regeneration never run at the same time, and a change of the rings during a refresh is
+  published after it. After startup a failure is logged and counted, and nothing ends the daemon: a
+  refresh that failed, or published with errors, is tried again after `--daemon.retry-interval`, doubled each
+  time it fails again up to one refresh interval, one that was refused at the next interval, as asking
+  again gets the same answer, and a failed regeneration like a failed refresh. A run that takes longer than
+  `--daemon.refresh-timeout` or `--daemon.regen-timeout` is stopped: a refresh publishes what it mirrored
+  and counts as `partial` and is tried again after `--daemon.retry-interval`, without waiting longer each
+  time, so that a mirror longer than the timeout is resumed; a regeneration is tried again like a failure. The publish itself is not bounded, and
+  `/healthz` answers as long as the process runs: alert on `firmirror_run_in_progress` staying at 1.
+- `jcat-tool` reads the signing keys each time it signs, so a new key is used by the next publish. An
+  unchanged document is signed again only at startup: to publish with a new key without waiting for a
+  change, restart it.
+- The first signal stops it starting anything and lets the publish in progress finish. The second ends it.
+  Run one daemon per store, and do not run a refresh job next to it.
+
+Metrics are served at `/metrics` on `--daemon.metrics-address`, with `/healthz`:
+
+| Metric | |
+|--------|-|
+| `firmirror_refresh_runs_total{result}` | Refreshes, `success`, `partial` (a vendor or the package cleanup failed, rings were refused, the run was stopped for its timeout, or what was mirrored could not be published yet) or `failure` |
+| `firmirror_refresh_duration_seconds` | Duration of a refresh (histogram) |
+| `firmirror_refresh_last_success_timestamp_seconds` | When a refresh last succeeded |
+| `firmirror_refresh_new_components` | Components the last refresh mirrored |
+| `firmirror_regen_runs_total{result}` | Regenerations for a change of the rings, `success`, `unchanged` (the rings serve what the last published ones do) or `failure` |
+| `firmirror_regen_last_success_timestamp_seconds` | When one last succeeded |
+| `firmirror_bkc_checks_total{result}` | Reads of the rings, `unchanged`, `changed` or `error` |
+| `firmirror_bkc_last_check_timestamp_seconds` | When the rings were last read successfully |
+| `firmirror_bkc_last_change_timestamp_seconds` | When they were last seen to change |
+| `firmirror_run_in_progress{kind}` | 1 while a `refresh` or a `regen` runs |
+
+along with the Go runtime and process metrics. `firmirror_refresh_last_success_timestamp_seconds` is 0 until
+the first refresh after a start that ended without error (a vendor failing, refused rings, a failed
+cleanup or a timeout all leave it as it was), so an alert on
+`time() - firmirror_refresh_last_success_timestamp_seconds` must also hold for
+`time() - process_start_time_seconds`, and one on `firmirror_refresh_runs_total{result="partial"}` tells that a
+refresh keeps publishing with errors (see the logs for a vendor, the package cleanup or refused rings).
 
 ### Incremental Updates
 
@@ -365,7 +439,7 @@ For production use, obtain certificates from a trusted Certificate Authority.
 
 ## Kubernetes Deployment
 
-A Helm chart is available in `chart/` for deploying Firmirror as a CronJob.
+A Helm chart is available in `chart/` for deploying Firmirror as a CronJob, or as the [daemon](#daemon) with `--set daemon.enabled=true`.
 
 ```bash
 helm install firmirror ./chart \
@@ -457,6 +531,7 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 │   ├── firmirror.go              # CLI entry point, flags, shared helpers
 │   ├── refresh.go                # refresh
 │   ├── bkc.go                    # bkc status, bkc promote
+│   ├── daemon.go                 # daemon
 │   └── regen.go                  # regen-metadata
 ├── pkg/
 │   ├── firmirror/                # Core sync logic, storage backends
@@ -469,6 +544,7 @@ Note: Some tests require `fwupdtool` and `jcat-tool` to be installed.
 │   │   ├── storage_local.go      # Local filesystem storage
 │   │   └── storage_s3.go         # S3 storage backend
 │   ├── bkc/                      # Rollout rings: the definitions file, tagging, promotion
+│   ├── daemon/                   # The daemon: scheduling, watching the rings, metrics
 │   ├── lvfs/                     # LVFS AppStream XML types
 │   ├── vendors/
 │   │   ├── dell/                 # Dell vendor implementation

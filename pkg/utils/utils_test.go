@@ -164,6 +164,26 @@ func TestWriteFileAtomic(t *testing.T) {
 	assert.Len(t, entries, 1, "no temporary file is left")
 }
 
+func TestRemoveStaleTemporariesRemovesOnlyOldTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-48 * time.Hour)
+	for name, age := range map[string]time.Time{
+		".firmirror-tmp-old":   old,
+		".firmirror-tmp-fresh": time.Now(),
+		"metadata.xml.zst":     old,
+	} {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
+		require.NoError(t, os.Chtimes(path, age, age))
+	}
+
+	assert.Equal(t, 1, RemoveStaleTemporaries(dir, 24*time.Hour))
+
+	assert.NoFileExists(t, filepath.Join(dir, ".firmirror-tmp-old"))
+	assert.FileExists(t, filepath.Join(dir, ".firmirror-tmp-fresh"), "a write may be using it")
+	assert.FileExists(t, filepath.Join(dir, "metadata.xml.zst"))
+}
+
 func TestRedactedSaysNoCredentialsAndNoToken(t *testing.T) {
 	assert.Equal(t, "https://host/a.yml", Redacted("https://user:pw@host/a.yml?token=x#f"))
 	assert.Equal(t, "dir/a.yml", Redacted("dir/a.yml"))

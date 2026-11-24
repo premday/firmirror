@@ -24,4 +24,10 @@ jobs:
       run: go build -v ./...
 
     - name: Test
-      run: go test -v ./...
+      run: go test -race -v ./...
+
+    - name: Lint and render the chart
+      run: |
+        helm lint chart
+        helm template release chart > /dev/null
+        helm template release chart --set daemon.enabled=true --set daemon.metrics.service.enabled=true --set daemon.metrics.podMonitor.enabled=true > /dev/null

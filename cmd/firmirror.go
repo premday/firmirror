@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/alecthomas/kong"
 
@@ -63,6 +64,15 @@ func (o Overrides) apply(config *firmirror.FirmirrorConfig) {
 	config.Force, config.StopSigning, config.DropBaseURL = o.Force, o.StopSigning, o.DropBaseURL
 }
 
+type DaemonFlags struct {
+	RefreshInterval time.Duration `help:"Time from the end of a refresh to the next one. The refresh at startup counts as the first." default:"24h"`
+	BKCPollInterval time.Duration `name:"bkc-poll-interval" help:"How often --bkc.file is read to see whether it changed: the only way to tell for a URL, and a safety net for a path, which is also watched for changes. A change publishes the metadata again, signed." default:"15m"`
+	RetryInterval   time.Duration `help:"Time from a refresh that failed or published with errors, or a failed regeneration, to its retry. It doubles each time the run fails again, up to --daemon.refresh-interval." default:"15m"`
+	RefreshTimeout  time.Duration `help:"Time after which a refresh is stopped, and what it mirrored published, as one that hangs holds up every publish after it. The refresh at startup mirrors everything and counts as one. 0 sets none." default:"12h"`
+	RegenTimeout    time.Duration `help:"Time after which a regeneration is stopped, and tried again. 0 sets none." default:"1h"`
+	MetricsAddress  string        `help:"Address to serve the Prometheus metrics (/metrics) and /healthz on. Empty serves none." default:":9090"`
+}
+
 var args struct {
 	DellFlags       `embed:"" prefix:"dell." group:"Dell" help:"Dell firmware fetching."`
 	HPEFlags        `embed:"" prefix:"hpe." group:"HPE" help:"HPE firmware fetching."`
@@ -80,6 +90,11 @@ var args struct {
 		Overrides `embed:""`
 	} `cmd:"" name:"regen-metadata" help:"Publish the stored metadata again, rendered with the current rollout rings and signed with the current keys, even if it did not change. Use it when the rings changed, or to sign with a new key."`
 
+	Daemon struct {
+		Overrides   `embed:""`
+		DaemonFlags `embed:"" prefix:"daemon." group:"Daemon" help:"Daemon configuration."`
+	} `cmd:"" help:"Run as an application instead of a job: refresh and publish the metadata at startup whether or not it changed, publish it again when --bkc.file changes, refresh every --daemon.refresh-interval, and export Prometheus metrics."`
+
 	Rollout struct {
 		Status struct {
 			Ring string `help:"Only report this ring." default:""`
@@ -93,7 +108,7 @@ var args struct {
 			AllowDowngrade bool     `help:"Allow a promotion that moves the ring backwards. fwupdmgr sync installs older releases too, so this downgrades the hosts on the ring." default:"false"`
 			Prune          bool     `help:"Also remove the entries of components the mirror no longer has. Not with --component." default:"false"`
 			AllowMassPrune bool     `help:"Let --prune remove more than half of the entries of the file, which a mirror that is partial or of another environment would." default:"false"`
-		} `cmd:"" help:"Move a ring on, in the file --bkc.file names, which is created if it does not exist. Nothing is published: the file is committed, and the next refresh or regen-metadata publishes it."`
+		} `cmd:"" help:"Move a ring on, in the file --bkc.file names, which is created if it does not exist. Nothing is published: the file is committed, and the next refresh or regen-metadata publishes it, or the daemon, which reads the file again."`
 	} `cmd:"" name:"bkc" help:"Inspect and promote the rollout rings."`
 }
 
@@ -125,6 +140,8 @@ func run(command string) error {
 		return runRefresh(ctx, stop)
 	case "regen-metadata":
 		return runRegenMetadata(ctx)
+	case "daemon":
+		return runDaemon(ctx)
 	case "bkc status":
 		return runBKCStatus(ctx)
 	case "bkc promote <ring>":
@@ -189,6 +206,25 @@ func openStorage(ctx context.Context) (firmirror.Storage, error) {
 	return storage, nil
 }
 
+// openWritableStorage is openStorage for a command that writes to the storage,
+// which also removes what a write that was killed left in it.
+func openWritableStorage(ctx context.Context) (firmirror.Storage, error) {
+	storage, err := openStorage(ctx)
+	if err == nil {
+		removeStaleTemporaries(storage)
+	}
+	return storage, err
+}
+
+// removeStaleTemporaries removes what a write that was killed left in a local
+// storage. A process that keeps running calls it again, as it is only what is
+// old that it removes.
+func removeStaleTemporaries(storage firmirror.Storage) {
+	if local, ok := storage.(*firmirror.LocalStorage); ok {
+		local.RemoveStaleTemporaries()
+	}
+}
+
 // checkOutputDir fails when the output directory does not exist, so that a
 // command that only reads does not create it.
 func checkOutputDir() error {
@@ -208,7 +244,7 @@ func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirr
 	if err := checkOutputDir(); err != nil {
 		return nil, nil, err
 	}
-	storage, err := openStorage(ctx)
+	storage, err := openWritableStorage(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -217,17 +253,38 @@ func openSyncer(ctx context.Context, config firmirror.FirmirrorConfig) (*firmirr
 		return nil, nil, err
 	}
 	cleanup := func() { os.RemoveAll(cacheDir) }
+	syncer, err := syncerOn(ctx, config, storage, cacheDir)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return syncer, cleanup, nil
+}
+
+// syncerOn is a syncer on the metadata stored in storage, working in cacheDir.
+func syncerOn(ctx context.Context, config firmirror.FirmirrorConfig, storage firmirror.Storage, cacheDir string) (*firmirror.FirmirrorSyncer, error) {
 	config.CacheDir = cacheDir
 	syncer, err := firmirror.NewFirmirrorSyncer(config, storage)
 	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("failed to create syncer: %w", err)
+		return nil, fmt.Errorf("failed to create syncer: %w", err)
 	}
 	if err := syncer.LoadMetadata(ctx); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("failed to load existing metadata: %w", err)
+		return nil, fmt.Errorf("failed to load existing metadata: %w", err)
 	}
-	return syncer, cleanup, nil
+	return syncer, nil
+}
+
+// publishConfig is what a run that publishes needs: the signing keys, the base
+// URL, the rollout rings and the overrides.
+func publishConfig(definitions *bkc.File, overrides Overrides) firmirror.FirmirrorConfig {
+	config := firmirror.FirmirrorConfig{
+		Certificate:     args.Signature.Certificate,
+		PrivateKey:      args.Signature.PrivateKey,
+		FirmwareBaseURL: args.FirmwareBaseURL,
+		BKC:             definitions,
+	}
+	overrides.apply(&config)
+	return config
 }
 
 var shutdownSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}

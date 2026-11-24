@@ -1,0 +1,29 @@
+{{- /*
+The daemon, which replaces the refresh CronJob and the regen-metadata CronJob: it
+refreshes on an interval, publishes the metadata again when the rollout rings
+change, and serves metrics. One replica, replaced only after it stopped: the
+store has one writer.
+*/ -}}
+{{- if include "firmirror.daemonEnabled" . }}
+{{- $daemon := .Values.daemon }}
+{{- $port := include "firmirror.metricsPort" . | int }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "firmirror.fullname" . }}
+  labels:
+    {{- include "firmirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "firmirror.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: daemon
+  template:
+    {{- include "firmirror.podMetadata" (dict "root" . "labels" (dict "app.kubernetes.io/component" "daemon")) | nindent 4 }}
+    spec:
+      {{- include "firmirror.podSpec" (dict "root" . "args" (include "firmirror.daemonArgs" .) "restartPolicy" "Always" "terminationGracePeriodSeconds" (ternary 600 $daemon.terminationGracePeriodSeconds (kindIs "invalid" $daemon.terminationGracePeriodSeconds)) "ports" (list (dict "name" "metrics" "containerPort" $port "protocol" "TCP")) "probes" (dict "startupProbe" (dict "httpGet" (dict "path" "/healthz" "port" "metrics") "periodSeconds" 10 "failureThreshold" 30) "readinessProbe" (dict "httpGet" (dict "path" "/healthz" "port" "metrics") "periodSeconds" 10))) | nindent 6 }}
+{{- end }}

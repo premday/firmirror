@@ -3,6 +3,7 @@ package bkc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -110,17 +111,24 @@ var warnedUnknown sync.Map
 // component served by no ring, silently. Plain HTTP is refused unless allowHTTP
 // says the network is trusted. The read is bounded by ReadTimeout.
 func Load(ctx context.Context, source string, allowHTTP bool) (*File, error) {
+	file, _, err := LoadWithDigest(ctx, source, allowHTTP)
+	return file, err
+}
+
+// LoadWithDigest is Load that also returns the SHA-256 of the bytes it read, to
+// tell whether a source changed without comparing what was parsed from it.
+func LoadWithDigest(ctx context.Context, source string, allowHTTP bool) (*File, [sha256.Size]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ReadTimeout)
 	defer cancel()
 	data, err := utils.ReadSource(ctx, source, MaxFileSize, !allowHTTP)
 	if err != nil {
-		return nil, fmt.Errorf("reading the rollout rings: %w", err)
+		return nil, [sha256.Size]byte{}, fmt.Errorf("reading the rollout rings: %w", err)
 	}
 	file, err := parse(data, utils.IsRemote(source))
 	if err != nil {
-		return nil, fmt.Errorf("reading the rollout rings from %s: %w", utils.Redacted(source), err)
+		return nil, [sha256.Size]byte{}, fmt.Errorf("reading the rollout rings from %s: %w", utils.Redacted(source), err)
 	}
-	return file, nil
+	return file, sha256.Sum256(data), nil
 }
 
 // Parse reads a file strictly, as one that is edited.
@@ -467,6 +475,19 @@ func FollowLinks(path string) (string, error) {
 		path = target
 	}
 	return "", fmt.Errorf("%s: too many levels of symbolic links", path)
+}
+
+// SameServing reports whether two files tag releases the same: they are Equal but
+// for the informational names, which a ring serves no differently.
+func (f *File) SameServing(other *File) bool {
+	unnamed := func(file *File) *File {
+		file = file.Clone()
+		for i := range file.Components {
+			file.Components[i].Name = ""
+		}
+		return file
+	}
+	return unnamed(f).Equal(unnamed(other))
 }
 
 // Equal reports whether two files marshal the same.
